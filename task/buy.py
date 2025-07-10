@@ -117,7 +117,7 @@ def buy_stream(
                     yield "抢票结束"
                     break
                 try:
-                    url = f"{base_url}/api/ticket/order/createV2?project_id={tickets_info['project_id']}"
+                    url = f"{base_url}/api/ticket/order/createV2?project_id={tickets_info['project_id']}%20%20"
                     if is_hot_project:
                         payload["ctoken"] = ctoken_generator.generate_ctoken(is_create_v2=True)
                         payload["ptoken"] = request_result["data"]["ptoken"]
