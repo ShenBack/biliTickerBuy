@@ -2,6 +2,7 @@ import base64
 import os
 import time
 import threading
+import webbrowser
 from argparse import Namespace
 
 import gradio as gr
@@ -56,7 +57,6 @@ def _share_tab(server_name: str | None = None):
             ],
             value="1001701 2026BML",
             allow_custom_value=True,
-            filterable=False,
         )
         share_host = gr.Textbox(
             label="访问地址（留空自动使用局域网IP）",
@@ -88,6 +88,7 @@ def _share_tab(server_name: str | None = None):
             host = (custom_host or "").strip() or lan_ip
             url = f"http://{host}:{actual_port}"
             gr.Info(f"分享服务已启动，端口 {actual_port}", duration=5)
+            threading.Timer(0.5, lambda: webbrowser.open(url)).start()
             return url
 
         def on_cf_start(pid, port):

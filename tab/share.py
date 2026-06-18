@@ -379,7 +379,7 @@ def api_submit(body: SubmitBody):
         project_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "项目", body.project_name)
         os.makedirs(project_dir, exist_ok=True)
         buyer_names = "_".join(b.get("name", "") for b in body.buyer_info)
-        filename = f"{body.project_name}_{body.screen_name}_{body.ticket_desc}_{buyer_names}.json"
+        filename = f"{username}_{body.project_name}_{body.screen_name}_{body.ticket_desc}_{buyer_names}.json"
         filename = re.sub(r'[/:*?"<>|]', "", filename)
         filepath = os.path.join(project_dir, filename)
         with open(filepath, "w", encoding="utf-8") as f:

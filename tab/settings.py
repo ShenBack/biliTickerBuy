@@ -1066,7 +1066,6 @@ def setting_tab():
                     ],
                     value="https://show.bilibili.com/platform/detail.html?id=1001701",
                     allow_custom_value=True,
-                    filterable=False,
                     scale=5,
                 )
                 ticket_id_btn = gr.Button(
