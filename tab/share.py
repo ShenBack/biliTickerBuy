@@ -156,33 +156,66 @@ class CookiesBody(BaseModel):
 
 
 import time as _time
+import uuid as _uuid
 
-_session: dict = {"cookies": None, "time": 0}
+# 按 session_id 隔离的会话存储：{session_id: {"cookies": ..., "time": ...}}
+_sessions: dict[str, dict] = {}
 SESSION_TTL = 36000  # 10 hour
 
 
-def _save_session(cookies: list[dict[str, str]]):
-    _session["cookies"] = cookies
-    _session["time"] = _time.time()
+def _get_session_id(request) -> str:
+    """从请求 Cookie 中读取 session_id，没有则生成一个新的"""
+    sid = request.cookies.get("btb_sid")
+    if sid and sid in _sessions:
+        return sid
+    return ""
 
 
-def _get_session() -> list[dict[str, str]] | None:
-    if _session["cookies"] and _time.time() - _session["time"] < SESSION_TTL:
-        return _session["cookies"]
+def _new_session_id() -> str:
+    return _uuid.uuid4().hex[:16]
+
+
+def _save_session(session_id: str, cookies: list[dict[str, str]]):
+    _sessions[session_id] = {"cookies": cookies, "time": _time.time()}
+    _cleanup_sessions()
+
+
+def _get_session(session_id: str) -> list[dict[str, str]] | None:
+    entry = _sessions.get(session_id)
+    if entry and entry["cookies"] and _time.time() - entry["time"] < SESSION_TTL:
+        return entry["cookies"]
     return None
 
 
+def _cleanup_sessions():
+    now = _time.time()
+    expired = [k for k, v in _sessions.items() if now - v["time"] >= SESSION_TTL]
+    for k in expired:
+        del _sessions[k]
+
+
+from fastapi import Request
+
 @_app.get("/api/session")
-def api_session():
-    saved = _get_session()
+def api_session(request: Request):
+    sid = _get_session_id(request)
+    saved = _get_session(sid) if sid else None
     if saved:
-        return JSONResponse({"ok": True, "cookies": saved})
-    return JSONResponse({"ok": False})
+        resp = JSONResponse({"ok": True, "cookies": saved})
+        return resp
+    # 没有 session，返回新的 session_id
+    new_sid = _new_session_id()
+    resp = JSONResponse({"ok": False, "session_id": new_sid})
+    resp.set_cookie("btb_sid", new_sid, max_age=SESSION_TTL, httponly=True)
+    return resp
 
 
 @_app.post("/api/project")
-def api_project(body: CookiesBody):
-    _save_session(body.cookies)
+def api_project(body: CookiesBody, http_request: Request):
+    sid = _get_session_id(http_request)
+    if not sid:
+        sid = _new_session_id()
+    _save_session(sid, body.cookies)
     request = BiliRequest(cookies=body.cookies, proxy="none")
     from interface.project import fetch_project_payload
     try:
@@ -220,14 +253,18 @@ def api_project(body: CookiesBody):
             "tickets": tickets,
         })
 
-    return {
+    resp = JSONResponse({
         "ok": True,
         "project_id": _project_id,
         "project_name": data.get("name", ""),
         "is_hot_project": bool(data.get("hotProject", False)),
         "screens": screens,
         "cookies": synced_cookies,
-    }
+    })
+    # 如果是新 session，设置 cookie
+    if http_request.cookies.get("btb_sid") != sid:
+        resp.set_cookie("btb_sid", sid, max_age=SESSION_TTL, httponly=True)
+    return resp
 
 
 @_app.post("/api/buyers")
@@ -350,6 +387,14 @@ def api_submit(body: SubmitBody):
         logger.info(f"配置已保存: {filepath}")
     except Exception as exc:
         logger.error(f"保存配置文件失败: {exc}")
+
+    # 将扫码登录的账号保存到 cookies.json 账号列表
+    try:
+        import util
+        account = util.main_request.cookieManager.add_account(body.cookies)
+        logger.info(f"分享账号已保存: {account.name} (uid={account.uid})")
+    except Exception as exc:
+        logger.error(f"保存分享账号失败: {exc}")
 
     payload = {
         "msg_type": "text",
