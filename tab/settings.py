@@ -198,6 +198,56 @@ def _format_ticket_option(screen_name: str, ticket: dict, ticket_price: int) -> 
     )
 
 
+def _load_people_records() -> list[dict]:
+    people_path = os.path.join(util.EXE_PATH, "people.json")
+    if not os.path.exists(people_path):
+        return []
+    try:
+        with open(people_path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    records = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        personal_id = item.get("personal_id")
+        if name and personal_id:
+            records.append({"name": name, "personal_id": personal_id})
+    return records
+
+
+def _render_people_cards_html(records: list[dict] | None = None) -> str:
+    if records is None:
+        records = _load_people_records()
+    if not records:
+        return (
+            '<div class="btb-people-empty">'
+            "<span>暂无实名购票人数据，请先点击“从B站导入实名购票人(完整身份证)”</span>"
+            "</div>"
+        )
+    cards = []
+    for idx, item in enumerate(records, start=1):
+        name = html.escape(str(item.get("name", "")))
+        personal_id_raw = str(item.get("personal_id", ""))
+        cards.append(
+            '<div class="btb-people-card">'
+            f'<div class="btb-people-index">#{idx}</div>'
+            f'<div class="btb-people-name">{name}</div>'
+            f'<div class="btb-people-id">{html.escape(personal_id_raw)}</div>'
+            "</div>"
+        )
+    return (
+        '<div class="btb-people-grid-view">'
+        f'<div class="btb-people-count">共 {len(records)} 位实名购票人</div>'
+        f'<div class="btb-people-cards">{"".join(cards)}</div>'
+        "</div>"
+    )
+
+
 def _resolve_project_input(project_input: Any) -> tuple[int, int | str, str]:
     if isinstance(project_input, int):
         return project_input, project_input, ""
@@ -761,6 +811,10 @@ def login_tab():
                         "刷新账号列表",
                         elem_classes="btb-soft-button",
                     )
+                    import_people_btn = gr.Button(
+                        "从B站导入实名购票人(完整身份证)",
+                        elem_classes="btb-soft-button",
+                    )
                 gr_file_ui = gr.File(
                     label="当前登录信息文件",
                     value=lambda: GLOBAL_COOKIE_PATH,
@@ -822,16 +876,23 @@ def login_tab():
         def on_dropdown_change(choice):
             uid = _find_uid_from_choice(choice)
             if not uid:
-                return [gr.update(), gr.update()]
+                return [gr.update(), gr.update(), _render_people_cards_html()]
             account = util.main_request.cookieManager.find_by_uid(uid)
             if account is None:
                 gr.Warning(f"未找到账号 {uid}", duration=5)
-                return [gr.update(), gr.update()]
+                return [gr.update(), gr.update(), _render_people_cards_html()]
             _activate_account(account)
-            gr.Info(f"已切换到账号 {account.name}", duration=5)
+            gr.Info(f"已切换到账号 {account.name}，正在刷新实名购票人...", duration=3)
+            try:
+                _, records = _import_people_from_bili()
+                gr.Info(f"已切换到 {account.name}，导入 {len(records)} 位实名购票人", duration=5)
+                people_html = _render_people_cards_html(records)
+            except gr.Error:
+                people_html = _render_people_cards_html()
             return [
                 gr.update(value=GLOBAL_COOKIE_PATH),
                 gr.update(),
+                people_html,
             ]
 
         def on_delete_account(choice):
@@ -892,6 +953,39 @@ def login_tab():
                 value=_get_default_account_choice_from(new_choices),
             )
 
+        def _import_people_from_bili() -> tuple[str, list[dict]]:
+            url = "https://show.bilibili.com/api/ticket/buyer/list?nomask=1"
+            resp = util.main_request.get(url=url).json()
+            if resp.get("errno") not in (0, 1) or not resp.get("data"):
+                raise gr.Error(
+                    f"导入失败：{resp.get('msg') or resp.get('message') or '未知错误'}"
+                )
+            people_list = resp["data"].get("list") or []
+            if not people_list:
+                raise gr.Error("未获取到任何实名购票人信息")
+            records = []
+            for item in people_list:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                personal_id = item.get("personal_id")
+                if name and personal_id:
+                    records.append({"name": name, "personal_id": personal_id})
+            if not records:
+                raise gr.Error("接口未返回有效的姓名/身份证信息")
+            people_path = os.path.join(util.EXE_PATH, "people.json")
+            with open(people_path, "w", encoding="utf-8") as fp:
+                json.dump(records, fp, ensure_ascii=False, indent=2)
+            return people_path, records
+
+        def on_import_people():
+            people_path, records = _import_people_from_bili()
+            gr.Info(
+                f"已从 B 站导入 {len(records)} 位实名购票人，保存到 {people_path}",
+                duration=5,
+            )
+            return people_path, _render_people_cards_html(records)
+
         login_btn.click(on_login_click, outputs=[qr_img, qrcode_key_state])
 
         @gr.on(qrcode_key_state.change, inputs=qrcode_key_state, outputs=check_btn)
@@ -909,11 +1003,6 @@ def login_tab():
                 qrcode_key_state,
             ],
         )
-        account_dropdown.change(
-            on_dropdown_change,
-            inputs=[account_dropdown],
-            outputs=[gr_file_ui, account_dropdown],
-        )
         delete_btn.click(
             on_delete_account,
             inputs=[account_dropdown],
@@ -925,6 +1014,31 @@ def login_tab():
             on_refresh_accounts,
             inputs=None,
             outputs=[account_dropdown],
+        )
+
+        with gr.Column(elem_classes="btb-card btb-card-sky btb-layout-card"):
+            gr.HTML(
+                """
+                <div class="btb-card-head">
+                    <div>
+                        <h3>实名购票人</h3>
+                        <p>从 people.json 读取。</p>
+                    </div>
+                </div>
+                """
+            )
+            people_cards_html = gr.HTML(value=_render_people_cards_html())
+
+        import_people_btn.click(
+            on_import_people,
+            inputs=None,
+            outputs=[gr.File(visible=False), people_cards_html],
+        )
+
+        account_dropdown.change(
+            on_dropdown_change,
+            inputs=[account_dropdown],
+            outputs=[gr_file_ui, account_dropdown, people_cards_html],
         )
 
 
@@ -942,10 +1056,17 @@ def setting_tab():
                 """
             )
             with gr.Row(elem_classes="btb-action-band !items-end"):
-                ticket_id_ui = gr.Textbox(
+                ticket_id_ui = gr.Dropdown(
                     label="想抢票的活动链接",
+                    info="预置：1001701=2026BML，1001653=2026BW；可手动输入其它活动链接。",
                     interactive=True,
-                    placeholder="https://show.bilibili.com/platform/detail.html?id=xxxx",
+                    choices=[
+                        "https://show.bilibili.com/platform/detail.html?id=1001701",
+                        "https://show.bilibili.com/platform/detail.html?id=1001653",
+                    ],
+                    value="https://show.bilibili.com/platform/detail.html?id=1001701",
+                    allow_custom_value=True,
+                    filterable=False,
                     scale=5,
                 )
                 ticket_id_btn = gr.Button(

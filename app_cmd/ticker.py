@@ -46,10 +46,17 @@ def _share_tab(server_name: str | None = None):
             </div>
             """
         )
-        share_project_id = gr.Textbox(
+        share_project_id = gr.Dropdown(
             label="项目ID",
-            placeholder="输入B站会员购活动ID，例如 84096",
             info="可从活动链接中提取，如 ?id=84096",
+            interactive=True,
+            choices=[
+                "1001701 2026BML",
+                "1001653 2026BW",
+            ],
+            value="1001701 2026BML",
+            allow_custom_value=True,
+            filterable=False,
         )
         share_host = gr.Textbox(
             label="访问地址（留空自动使用局域网IP）",
@@ -68,11 +75,14 @@ def _share_tab(server_name: str | None = None):
         cf_btn = gr.Button("启动 Cloudflare 公网隧道", elem_classes="btb-soft-button")
         share_result = gr.Textbox(label="分享链接", interactive=False, lines=3)
 
-        def on_share_start(pid, custom_host, port):
+        def _parse_pid(pid):
             try:
-                pid_int = int(pid)
-            except (TypeError, ValueError):
+                return int(str(pid).strip().split()[0])
+            except (TypeError, ValueError, IndexError):
                 raise gr.Error("请输入有效的项目ID")
+
+        def on_share_start(pid, custom_host, port):
+            pid_int = _parse_pid(pid)
             port_int = int(port) if port else 7862
             actual_port = start_share_server(pid_int, port_int)
             host = (custom_host or "").strip() or lan_ip
@@ -82,10 +92,7 @@ def _share_tab(server_name: str | None = None):
 
         def on_cf_start(pid, port):
             from tab.share import start_cloudflare_tunnel
-            try:
-                pid_int = int(pid)
-            except (TypeError, ValueError):
-                raise gr.Error("请输入有效的项目ID")
+            pid_int = _parse_pid(pid)
             port_int = int(port) if port else 7862
             start_share_server(pid_int, port_int)
             gr.Info("正在启动 Cloudflare 隧道，请等待...", duration=5)
