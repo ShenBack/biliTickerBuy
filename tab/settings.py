@@ -2,6 +2,8 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -329,6 +331,26 @@ def on_submit_ticket_id(num):
             f"{item['name']}-{item['personal_id']}" for item in buyer_value
         ]
         addr_value = addr_json["data"]["addr_list"]
+        
+        # Cookie 同步：打印当前所有 Cookie（调试用途）
+        logger.info("=" * 60)
+        logger.info("[Cookie 同步] 选票信息加载完成，当前所有 Cookie：")
+        for cookie in util.main_request.cookieManager.get_cookies(force=True) or []:
+            logger.info(f"  {cookie.get('name')}: {cookie.get('value', '')[:50]}{'...' if len(cookie.get('value', '')) > 50 else ''}")
+        logger.info("=" * 60)
+        
+        # 地址空值兜底
+        if not addr_value:
+            addr_value = [{
+                "id": "default",
+                "name": "SX",
+                "phone": "18888888888",
+                "prov": "浙江省",
+                "city": "宁波市",
+                "area": "余姚市",
+                "addr": "红旗路144号碧桂园"
+            }]
+        
         addr_str_list = [
             f"{item['addr']}-{item['name']}-{item['phone']}" for item in addr_value
         ]
@@ -482,6 +504,86 @@ def upload_file(filepath):
     except Exception as exc:
         logger.exception(exc)
         raise gr.Error("登录信息导入失败，请检查文件格式。")
+
+
+def _find_browser_exe() -> str | None:
+    candidates = [
+        shutil.which("msedge"),
+        shutil.which("chrome"),
+        os.path.expandvars(
+            r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
+        ),
+        os.path.expandvars(
+            r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
+        ),
+        os.path.expandvars(
+            r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+        ),
+        os.path.expandvars(
+            r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+        ),
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def _open_bilibili_with_cookies():
+    cookies = util.main_request.cookieManager.get_cookies(force=True)
+    if not cookies:
+        gr.Warning("当前无登录信息，请先登录", duration=5)
+        return
+
+    # 生成 JS 脚本：设置 cookie 并刷新
+    js_parts = []
+    for c in cookies:
+        name = c["name"]
+        value = c["value"]
+        # 单引号转义
+        safe_value = value.replace("'", "\\'")
+        js_parts.append(
+            f"document.cookie='{name}={safe_value}; domain=.bilibili.com; path=/; max-age=31536000';"
+        )
+    js_parts.append("location.reload();")
+    js_script = "\n".join(js_parts)
+
+    # 复制到剪贴板
+    try:
+        subprocess.run(
+            ["cmd", "/c", "clip"],
+            input=js_script.encode("utf-16-le"),
+            check=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+    # 启动浏览器：自动打开 DevTools + 禁用控制台粘贴警告
+    browser_exe = _find_browser_exe()
+    if not browser_exe:
+        import webbrowser
+        webbrowser.open("https://www.bilibili.com")
+    else:
+        profile_dir = os.path.join(TEMP_PATH, "bili_browser_profile")
+        subprocess.Popen(
+            [
+                browser_exe,
+                f"--user-data-dir={profile_dir}",
+                "--auto-open-devtools-for-tabs",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-features=DevToolsConsoleWarning",
+                "--disable-popup-blocking",
+                "https://www.bilibili.com",
+            ]
+        )
+
+    gr.Info(
+        "已打开 B 站并将 Cookie 脚本复制到剪贴板。\n"
+        "在打开的 DevTools Console 中 Ctrl+V 粘贴并回车即可登录。",
+        duration=10,
+    )
 
 
 def login_tab():
@@ -645,7 +747,11 @@ def login_tab():
                         variant="stop",
                     )
                     upload_ui = gr.UploadButton(
-                        label="导入现有登录文件",
+                        "导入现有登录文件",
+                        elem_classes="btb-soft-button",
+                    )
+                    open_browser_btn = gr.Button(
+                        "用Cookie打开B站",
                         elem_classes="btb-soft-button",
                     )
                 gr_file_ui = gr.File(
@@ -798,6 +904,7 @@ def login_tab():
             outputs=[gr_file_ui, account_dropdown, qr_img],
         )
         upload_ui.upload(upload_file, [upload_ui], [gr_file_ui, account_dropdown])
+        open_browser_btn.click(fn=_open_bilibili_with_cookies)
 
 
 def setting_tab():
@@ -849,13 +956,13 @@ def setting_tab():
 
                 with gr.Row(elem_classes="btb-split-grid !items-end"):
                     people_buyer_name = gr.Textbox(
-                        value=lambda: ConfigDB.get("people_buyer_name") or "",
+                        value=lambda: ConfigDB.get("people_buyer_name") or "SX",
                         label="联系人姓名",
                         placeholder="请输入姓名",
                         interactive=True,
                     )
                     people_buyer_phone = gr.Textbox(
-                        value=lambda: ConfigDB.get("people_buyer_phone") or "",
+                        value=lambda: ConfigDB.get("people_buyer_phone") or "18888888888",
                         label="联系人电话",
                         placeholder="请输入电话",
                         interactive=True,

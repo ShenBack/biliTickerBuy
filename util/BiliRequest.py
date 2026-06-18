@@ -203,9 +203,43 @@ class BiliRequest:
         response.raise_for_status()
         self.clear_request_count()
         self.mark_current_proxy_success()
+        self._sync_response_cookies(response)
         if response.json().get("msg", "") == "请先登录":
             raise RuntimeError("当前未登录，请重新登陆")
         return response
+
+    def _sync_response_cookies(self, response):
+        """将服务器下发的 Set-Cookie 同步到 CookieManager"""
+        if not response.cookies:
+            return
+        try:
+            current_cookies = self.cookieManager.get_cookies(force=True)
+        except RuntimeError:
+            return
+
+        current_names = {c["name"] for c in current_cookies}
+        updated = False
+        for cookie in response.cookies:
+            if cookie.name not in current_names:
+                current_cookies.append({"name": cookie.name, "value": cookie.value})
+                loguru.logger.debug(f"新增Cookie: {cookie.name}={cookie.value[:30]}...")
+                updated = True
+
+        if updated:
+            self.cookieManager.db.insert(self.cookieManager._COOKIE_KEY, current_cookies)
+
+    def get_all_cookies(self) -> list[dict]:
+        """获取所有Cookie（CookieManager + Session），用于调试"""
+        result = {}
+        try:
+            for c in self.cookieManager.get_cookies():
+                result[c["name"]] = c["value"]
+        except RuntimeError:
+            pass
+        for cookie in self.session.cookies:
+            if cookie.name not in result:
+                result[cookie.name] = cookie.value
+        return [{"name": k, "value": v} for k, v in result.items()]
 
     def get_request_name(self):
         try:

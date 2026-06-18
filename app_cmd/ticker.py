@@ -1,7 +1,7 @@
 import base64
 import os
-import threading
 import time
+import threading
 from argparse import Namespace
 
 import gradio as gr
@@ -17,8 +17,94 @@ def exit_app_ui():
     gr.Info("程序将在弹出提示后退出")
 
 
-def shutdown_app_process(delay_seconds: float = 1.0) -> None:
-    threading.Timer(delay_seconds, lambda: os._exit(0)).start()
+def _get_lan_ip() -> str:
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _share_tab(server_name: str | None = None):
+    from tab.share import start_share_server
+
+    lan_ip = _get_lan_ip()
+
+    with gr.Column(elem_classes="btb-card btb-layout-card"):
+        gr.HTML(
+            """
+            <div class="btb-card-head">
+                <div>
+                    <div class="btb-card-head__eyebrow">Share</div>
+                    <h3>分享选票</h3>
+                    <p>输入项目ID后生成链接，发送给他人扫码登录、选票，配置会自动发送到飞书。</p>
+                </div>
+            </div>
+            """
+        )
+        share_project_id = gr.Textbox(
+            label="项目ID",
+            placeholder="输入B站会员购活动ID，例如 84096",
+            info="可从活动链接中提取，如 ?id=84096",
+        )
+        share_host = gr.Textbox(
+            label="访问地址（留空自动使用局域网IP）",
+            placeholder=f"留空则使用 {lan_ip}，可填写公网域名或IP",
+            info="同局域网直接用自动IP；跨网络需填写公网IP或域名，或使用内网穿透工具",
+            value="",
+        )
+        share_port = gr.Number(
+            label="端口号",
+            value=7862,
+            precision=0,
+            minimum=1024,
+            maximum=65535,
+        )
+        share_btn = gr.Button("启动分享服务（局域网）", elem_classes="btb-strong-button")
+        cf_btn = gr.Button("启动 Cloudflare 公网隧道", elem_classes="btb-soft-button")
+        share_result = gr.Textbox(label="分享链接", interactive=False, lines=3)
+
+        def on_share_start(pid, custom_host, port):
+            try:
+                pid_int = int(pid)
+            except (TypeError, ValueError):
+                raise gr.Error("请输入有效的项目ID")
+            port_int = int(port) if port else 7862
+            actual_port = start_share_server(pid_int, port_int)
+            host = (custom_host or "").strip() or lan_ip
+            url = f"http://{host}:{actual_port}"
+            gr.Info(f"分享服务已启动，端口 {actual_port}", duration=5)
+            return url
+
+        def on_cf_start(pid, port):
+            from tab.share import start_cloudflare_tunnel
+            try:
+                pid_int = int(pid)
+            except (TypeError, ValueError):
+                raise gr.Error("请输入有效的项目ID")
+            port_int = int(port) if port else 7862
+            start_share_server(pid_int, port_int)
+            gr.Info("正在启动 Cloudflare 隧道，请等待...", duration=5)
+            try:
+                tunnel_url = start_cloudflare_tunnel(port_int)
+                return tunnel_url
+            except Exception as exc:
+                raise gr.Error(str(exc))
+
+        share_btn.click(
+            on_share_start,
+            inputs=[share_project_id, share_host, share_port],
+            outputs=share_result,
+        )
+        cf_btn.click(
+            on_cf_start,
+            inputs=[share_project_id, share_port],
+            outputs=share_result,
+        )
 
 
 def ticker_cmd(args: Namespace):
@@ -186,7 +272,8 @@ def ticker_cmd(args: Namespace):
                     update_tab(demo)
                 with gr.Tab("日志查看", id="logs", elem_id="btb-tab-logs"):
                     log_task_refresh_token, log_task_panel = log_tab()
-
+                with gr.Tab("分享选票", id="share", elem_id="btb-tab-share"):
+                    _share_tab(args.server_name)
         demo.load(
             fn=refresh_all_task_panels,
             outputs=[
