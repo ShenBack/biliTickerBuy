@@ -855,17 +855,17 @@ def buy_stream(
                     payment_qr_url=payment_url,
                     status="succeeded",
                 )
-                if auto_open_payment_url:
-                    try:
-                        webbrowser.open(payment_url)
-                        yield emit(
-                            "status",
-                            "已自动打开支付链接",
-                            payment_qr_url=payment_url,
-                            status="succeeded",
-                        )
-                    except Exception as exc:
-                        yield emit("status", f"自动打开支付链接失败: {exc}")
+                # if auto_open_payment_url:
+                #     try:
+                #         webbrowser.open(payment_url)
+                #         yield emit(
+                #             "status",
+                #             "已自动打开支付链接",
+                #             payment_qr_url=payment_url,
+                #             status="succeeded",
+                #         )
+                #     except Exception as exc:
+                #         yield emit("status", f"自动打开支付链接失败: {exc}")
                 if show_qrcode:
                     qr_gen = qrcode.QRCode()
                     qr_gen.add_data(qrcode_url)
