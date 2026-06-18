@@ -757,6 +757,10 @@ def login_tab():
                         "用Cookie打开B站",
                         elem_classes="btb-soft-button",
                     )
+                    refresh_btn = gr.Button(
+                        "刷新账号列表",
+                        elem_classes="btb-soft-button",
+                    )
                 gr_file_ui = gr.File(
                     label="当前登录信息文件",
                     value=lambda: GLOBAL_COOKIE_PATH,
@@ -879,6 +883,15 @@ def login_tab():
                 gr.update(),
             ]
 
+        def on_refresh_accounts():
+            set_main_request(BiliRequest(cookies_config_path=GLOBAL_COOKIE_PATH))
+            new_choices = _get_account_choices()
+            gr.Info(f"已刷新账号列表，共 {len(new_choices)} 个账号", duration=3)
+            return gr.update(
+                choices=new_choices,
+                value=_get_default_account_choice_from(new_choices),
+            )
+
         login_btn.click(on_login_click, outputs=[qr_img, qrcode_key_state])
 
         @gr.on(qrcode_key_state.change, inputs=qrcode_key_state, outputs=check_btn)
@@ -908,6 +921,11 @@ def login_tab():
         )
         upload_ui.upload(upload_file, [upload_ui], [gr_file_ui, account_dropdown])
         open_browser_btn.click(fn=_open_bilibili_with_cookies)
+        refresh_btn.click(
+            on_refresh_accounts,
+            inputs=None,
+            outputs=[account_dropdown],
+        )
 
 
 def setting_tab():
