@@ -491,7 +491,7 @@ def upload_file(filepath):
         gr.Info(f"已导入账号 {account.name}", duration=5)
 
         new_choices = [
-            f"{a.uid} - {a.name} (Lv{a.level})"
+            f"{a.uid} - {a.name} (Lv{a.level})" + ("-大会员" if a.is_vip else "")
             for a in util.main_request.cookieManager.get_accounts()
         ]
         yield [
@@ -673,7 +673,10 @@ def login_tab():
 
         def _get_account_choices():
             accounts = util.main_request.cookieManager.get_accounts()
-            return [f"{a.uid} - {a.name} (Lv{a.level})" for a in accounts]
+            return [
+                f"{a.uid} - {a.name} (Lv{a.level})" + ("-大会员" if a.is_vip else "")
+                for a in accounts
+            ]
 
         def _get_default_account_choice() -> str | None:
             return _get_default_account_choice_from(_get_account_choices())
