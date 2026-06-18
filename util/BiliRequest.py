@@ -164,6 +164,10 @@ class BiliRequest:
             value = cookie.get("value")
             if name and value is not None:
                 client.cookies.set(name, value, domain=".bilibili.com")
+        
+        # 检查实际请求中的 cookie
+        loguru.logger.debug(f"[H2 Client Cookies] {dict(client.cookies)}")
+        
         if method.lower() == "post":
             return (
                 client.post(url, json=data) if isJson else client.post(url, data=data)
