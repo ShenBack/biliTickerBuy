@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -13,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
+from util import EXE_PATH
 from util.BiliRequest import BiliRequest
 
 FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/1dd7ee3b-f730-426c-8a90-ee1533c6222e"
@@ -24,6 +29,35 @@ _running_port: int = 0
 _project_id: int = 0
 _tunnel_process = None
 _tunnel_url: str = ""
+
+
+def _find_cloudflared() -> str | None:
+    """在多个候选位置查找 cloudflared 可执行文件"""
+    exe_name = "cloudflared.exe" if sys.platform == "win32" else "cloudflared"
+
+    # 1. 系统 PATH
+    found = shutil.which("cloudflared")
+    if found:
+        return found
+
+    # 2. EXE / 项目根目录
+    candidate = os.path.join(EXE_PATH, exe_name)
+    if os.path.isfile(candidate):
+        return candidate
+
+    # 3. PyInstaller 临时解压目录（打包场景）
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = os.path.join(meipass, exe_name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # 4. 当前工作目录
+    candidate = os.path.join(os.getcwd(), exe_name)
+    if os.path.isfile(candidate):
+        return candidate
+
+    return None
 
 
 def start_share_server(project_id: int, port: int = 7862) -> int:
@@ -45,20 +79,18 @@ def start_share_server(project_id: int, port: int = 7862) -> int:
 
 def start_cloudflare_tunnel(port: int) -> str:
     """启动 cloudflare tunnel，返回公网 URL"""
-    import shutil
-    import subprocess
-
     global _tunnel_process, _tunnel_url
 
     if _tunnel_process and _tunnel_process.poll() is None:
         return _tunnel_url
 
-    cloudflared = shutil.which("cloudflared")
+    cloudflared = _find_cloudflared()
     if not cloudflared:
         raise RuntimeError(
             "未找到 cloudflared，请先安装：\n"
             "Windows: winget install Cloudflare.cloudflared\n"
-            "或下载: https://github.com/cloudflare/cloudflared/releases"
+            "或下载: https://github.com/cloudflare/cloudflared/releases\n"
+            f"（也支持把 cloudflared.exe 放在 {EXE_PATH} 下）"
         )
 
     _tunnel_process = subprocess.Popen(
@@ -68,11 +100,9 @@ def start_cloudflare_tunnel(port: int) -> str:
         text=True,
     )
 
-    import re
-
-    deadline = time.time() + 30
     url_pattern = re.compile(r"https://[a-z0-9\-]+\.trycloudflare\.com")
 
+    deadline = time.time() + 30
     while time.time() < deadline:
         line = _tunnel_process.stderr.readline()
         if not line:
