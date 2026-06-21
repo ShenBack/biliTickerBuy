@@ -117,9 +117,7 @@ def ticker_cmd(args: TickerCliArgs):
     from tab.go import go_start_tab
     from tab.config import go_settings_tab
     from tab.log import log_tab, refresh_log_panel, refresh_task_panel
-    from tab.problems import problems_tab
     from tab.settings import login_tab, setting_tab
-    from tab.update import update_tab
     from util.log.LogWeb import attach_log_routes
     from util import ConfigDB, GLOBAL_COOKIE_PATH, LOG_DIR, TEMP_PATH
     from util.log.LogConfig import loguru_config
@@ -286,10 +284,6 @@ def ticker_cmd(args: TickerCliArgs):
                         load_go_settings_configs,
                         go_settings_load_outputs,
                     ) = go_settings_tab(header_ui)
-                with gr.Tab("项目说明", id="guide", elem_id="btb-tab-guide"):
-                    problems_tab()
-                with gr.Tab("软件更新", id="update", elem_id="btb-tab-update"):
-                    update_tab(demo)
                 with gr.Tab("日志查看", id="logs", elem_id="btb-tab-logs"):
                     log_task_refresh_token, log_task_panel = log_tab()
                 with gr.Tab("分享选票", id="share", elem_id="btb-tab-share"):
