@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import subprocess
 import sys
@@ -333,6 +333,19 @@ def buy_stream(config: BuyConfig):
         proxy_failure_threshold=config.proxy_max_consecutive_failures,
         proxy_cooldown_seconds=config.proxy_cooldown_seconds,
     )
+    # 启动时随机分配一个固定代理
+    if _request.proxy_manager.proxy_list and len(_request.proxy_manager.proxy_list) > 1:
+        from random import randint
+        random_idx = randint(0, len(_request.proxy_manager.proxy_list) - 1)
+        _request.proxy_manager.now_proxy_idx = random_idx
+        _request.proxy_manager.apply_to_session(_request.session)
+        logger.info(f"[代理分配] 本次终端固定使用代理: {_request.proxy_manager.current_proxy_display}")
+
+    # 注册代理使用
+    from util import GlobalStatusInstance
+    task_name = detail[:30] if len(detail) > 30 else detail
+    GlobalStatusInstance.register_proxy_usage(_request.proxy_manager.current_proxy, task_name)
+
     proxy_backoff = ProxyBackoff(max_seconds=config.proxy_backoff_max_seconds)
     is_hot_project = bool(tickets_info.get("is_hot_project", False))
     # use_local_token = bool(config.use_local_token)
@@ -732,6 +745,9 @@ def buy_stream(config: BuyConfig):
                 f"程序异常: {repr(e)}",
                 BuyStreamUpdate(status="failed"),
             )
+
+    # 注销代理使用
+    GlobalStatusInstance.unregister_proxy_usage(_request.proxy_manager.current_proxy, task_name)
 
 
 def buy_new_terminal(

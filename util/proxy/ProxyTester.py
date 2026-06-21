@@ -29,7 +29,23 @@ class ProxyTester:
                 return result
             ProxyManager(proxy).apply_to_session(session)
 
-            # 测试连通性和响应时间
+            # 先测试 HTTP 连通性
+            try:
+                start_time = time.time()
+                response = session.get(
+                    "http://api.bilibili.com/x/web-interface/nav",
+                    timeout=self.timeout,
+                )
+                end_time = time.time()
+                if response.status_code == 200:
+                    result["status"] = "success"
+                    result["response_time"] = round((end_time - start_time) * 1000, 2)
+                    result["ip_info"] = self._get_ip_info(session)
+                    return result
+            except Exception:
+                pass
+
+            # HTTP 失败则测试 HTTPS
             start_time = time.time()
             response = session.get(
                 "https://api.bilibili.com/x/web-interface/nav",
@@ -54,13 +70,16 @@ class ProxyTester:
                 result["ip_info"] = self._get_ip_info(session)
         except requests.exceptions.Timeout:
             result["error"] = f"连接超时 (>{self.timeout}s)"
-        except requests.exceptions.ProxyError:
-            result["error"] = "代理服务器错误或无法连接"
+        except requests.exceptions.ProxyError as e:
+            result["error"] = f"代理错误: {str(e)[:100]}"
         except requests.exceptions.ConnectionError as e:
-            if "proxy" in str(e).lower():
+            error_msg = str(e)
+            if "SOCKS" in error_msg:
+                result["error"] = f"SOCKS连接失败，请检查代理地址和认证信息"
+            elif "proxy" in error_msg.lower():
                 result["error"] = "代理连接失败"
             else:
-                result["error"] = "网络连接失败"
+                result["error"] = f"网络连接失败: {error_msg[:100]}"
         except Exception as e:
             result["error"] = f"未知错误: {str(e)}"
 
@@ -72,7 +91,7 @@ class ProxyTester:
         ip_services = [
             {
                 "name": "ip-api.com",
-                "url": "http://ip-api.com/json/",
+                "url": "http://ip-api.com/json/?fields=query,city,isp",
                 "parser": lambda data: (
                     f"{data.get('query', '未知')} ({data.get('city', '未知')}, {data.get('isp', '未知')})"
                 ),
@@ -82,11 +101,18 @@ class ProxyTester:
                 "url": "http://httpbin.org/ip",
                 "parser": lambda data: data.get("origin", "未知"),
             },
+            {
+                "name": "ip.sb",
+                "url": "https://api.ip.sb/geoip",
+                "parser": lambda data: (
+                    f"{data.get('ip', '未知')} ({data.get('city', '未知')}, {data.get('asn_organization', '未知')})"
+                ),
+            },
         ]
 
         for service in ip_services:
             try:
-                ip_response = session.get(service["url"], timeout=3)
+                ip_response = session.get(service["url"], timeout=8)
                 if ip_response.status_code == 200:
                     ip_data = ip_response.json()
                     return service["parser"](ip_data)

@@ -18,6 +18,11 @@ class TerminalViewState:
     countdown: str = "-"
     current_proxy: str = "未初始化"
     cooldown: str = "-"
+    buyer_name: str = ""
+    ticket_type: str = ""
+    show_time: str = ""
+    account_name: str = ""
+    fixed_proxy: str = ""
 
 
 @dataclass
@@ -90,6 +95,11 @@ class PlainTerminalRenderer(BaseTerminalRenderer):
             if isinstance(cooldown_remaining, int) and cooldown_remaining > 0
             else "-"
         )
+        self.state.buyer_name = getattr(state, "buyer_name", self.state.buyer_name)
+        self.state.ticket_type = getattr(state, "ticket_type", self.state.ticket_type)
+        self.state.show_time = getattr(state, "show_time", self.state.show_time)
+        self.state.account_name = getattr(state, "account_name", self.state.account_name)
+        self.state.fixed_proxy = getattr(state, "fixed_proxy", self.state.fixed_proxy)
         self._print_snapshot()
 
     def _print_snapshot(self, *, force: bool = False) -> None:
@@ -98,9 +108,27 @@ class PlainTerminalRenderer(BaseTerminalRenderer):
             self.state.countdown,
             self.state.current_proxy,
             self.state.cooldown,
+            self.state.buyer_name,
+            self.state.ticket_type,
+            self.state.show_time,
+            self.state.account_name,
+            self.state.fixed_proxy,
         )
         if not force and snapshot == self._last_snapshot:
             return
+
+        # 构建关键信息行
+        info_parts = []
+        if self.state.account_name:
+            info_parts.append(f"账号: {self.state.account_name}")
+        if self.state.buyer_name:
+            info_parts.append(f"购票人: {self.state.buyer_name}")
+        if self.state.ticket_type:
+            info_parts.append(f"票种: {self.state.ticket_type}")
+        if self.state.show_time:
+            info_parts.append(f"开售时间: {self.state.show_time}")
+        if self.state.fixed_proxy:
+            info_parts.append(f"固定IP: {self.state.fixed_proxy}")
 
         print(
             (
@@ -112,6 +140,11 @@ class PlainTerminalRenderer(BaseTerminalRenderer):
             ),
             flush=True,
         )
+        if info_parts:
+            print(
+                f"[信息] {' | '.join(info_parts)}",
+                flush=True,
+            )
         self._last_snapshot = snapshot
 
 
@@ -212,7 +245,8 @@ class TextualTerminalRenderer(BaseTerminalRenderer):
             }
 
             #status {
-                height: 5;
+                height: auto;
+                max-height: 20;
                 margin-bottom: 1;
             }
 
@@ -271,6 +305,19 @@ class TextualTerminalRenderer(BaseTerminalRenderer):
                 table.add_column(style="dim", ratio=1)
                 table.add_column(style="bold white", ratio=3)
 
+                # 关键信息
+                if self.state.account_name:
+                    table.add_row("账号", self.state.account_name)
+                if self.state.buyer_name:
+                    table.add_row("购票人", self.state.buyer_name)
+                if self.state.ticket_type:
+                    table.add_row("票种", self.state.ticket_type)
+                if self.state.show_time:
+                    table.add_row("开售时间", self.state.show_time)
+                if self.state.fixed_proxy:
+                    table.add_row("固定IP", self.state.fixed_proxy)
+
+                table.add_row("", "")  # 分隔行
                 table.add_row(
                     "倒计时",
                     self.state.countdown,
@@ -325,6 +372,11 @@ class TextualTerminalRenderer(BaseTerminalRenderer):
                     if isinstance(cooldown_remaining, int) and cooldown_remaining > 0
                     else "-"
                 )
+                self.state.buyer_name = getattr(state, "buyer_name", self.state.buyer_name)
+                self.state.ticket_type = getattr(state, "ticket_type", self.state.ticket_type)
+                self.state.show_time = getattr(state, "show_time", self.state.show_time)
+                self.state.account_name = getattr(state, "account_name", self.state.account_name)
+                self.state.fixed_proxy = getattr(state, "fixed_proxy", self.state.fixed_proxy)
                 self.update_status()
 
             def render_log_message(self, message: str, item: LogItem) -> Text:

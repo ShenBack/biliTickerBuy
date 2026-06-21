@@ -38,7 +38,7 @@ else:
 a = Analysis(
     ["main.py"],
     pathex=[project_root],
-    binaries=[],
+    binaries=[("cloudflared.exe", "."),],
     datas=datas,
     hiddenimports=hiddenimports,
     module_collection_mode={

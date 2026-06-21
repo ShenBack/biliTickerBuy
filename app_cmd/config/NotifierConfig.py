@@ -88,6 +88,15 @@ class NotifierConfig(BasicConfig):
     )
     """Local audio file played after success."""
 
+    feishu_webhook: str = config_field(
+        "",
+        env="BTB_FEISHU_WEBHOOK",
+        runtime="feishuWebhook",
+        db="feishuWebhook",
+        cli="--notifier-config.feishu-webhook",
+    )
+    """Feishu (Lark) webhook URL for notifications."""
+
     notify_proxy_exhausted: bool = config_field(
         False,
         env="BTB_NOTIFY_PROXY_EXHAUSTED",

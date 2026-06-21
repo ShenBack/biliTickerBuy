@@ -255,6 +255,24 @@ class NotifierManager:
             except Exception as e:
                 loguru.logger.error(f"MeoW创建失败: {e}")
 
+        # Feishu
+        if config.feishu_webhook:
+            try:
+                from util.FeishuUtil import FeishuNotifier
+
+                notifier = FeishuNotifier(
+                    webhook_url=config.feishu_webhook,
+                    title=title,
+                    content=content,
+                    interval_seconds=interval_seconds,
+                    duration_minutes=duration_minutes,
+                )
+                manager.register_notifier("Feishu", notifier)
+            except ImportError as e:
+                loguru.logger.error(f"Feishu导入失败: {e}")
+            except Exception as e:
+                loguru.logger.error(f"Feishu创建失败: {e}")
+
         # Audio
         if include_audio and config.audio_path:
             try:
@@ -297,6 +315,7 @@ class NotifierManager:
             ("Bark", config.bark_token, "Bark"),
             ("Ntfy", config.ntfy_url, "Ntfy"),
             ("MeoW", config.meow_nickname, "MeoW"),
+            ("Feishu", config.feishu_webhook, "飞书"),
         ]
         if include_audio:
             test_cases.append(("Audio", config.audio_path, "音频通知"))

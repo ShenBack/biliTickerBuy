@@ -1539,6 +1539,80 @@ select,
   }
 }
 
+/* ---------- People Cards ---------- */
+
+.btb-people-grid-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px 2px;
+}
+
+.btb-people-count {
+  font-size: 13px;
+  color: var(--text-subtle, #6b6b78);
+  letter-spacing: 0.02em;
+}
+
+.btb-people-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.btb-people-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #fff7f3 0%, #fde6e6 100%);
+  border: 1px solid rgba(140, 37, 53, 0.18);
+  box-shadow: 0 4px 12px rgba(140, 37, 53, 0.08);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.btb-people-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(140, 37, 53, 0.15);
+}
+
+.btb-people-index {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(140, 37, 53, 0.7);
+  letter-spacing: 0.08em;
+}
+
+.btb-people-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: #2b2b33;
+  word-break: break-word;
+}
+
+.btb-people-id {
+  font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  font-size: 13px;
+  color: #4a4a55;
+  letter-spacing: 0.04em;
+  word-break: break-all;
+}
+
+.btb-people-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  border: 1px dashed rgba(140, 37, 53, 0.25);
+  border-radius: 14px;
+  color: var(--text-subtle, #6b6b78);
+  font-size: 13px;
+  background: rgba(255, 247, 243, 0.4);
+  padding: 16px;
+}
+
 @media (max-width: 768px) {
   body.gradio-body {
     margin: 0 !important;

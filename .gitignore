@@ -2,6 +2,7 @@ config
 .gitignore
 venv
 .venv
+mergevenv
 .idea
 dist
 log/*

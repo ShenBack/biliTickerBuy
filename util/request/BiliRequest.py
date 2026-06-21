@@ -193,6 +193,10 @@ class BiliRequest:
             value = cookie.get("value")
             if name and value is not None:
                 client.cookies.set(name, value, domain=".bilibili.com")
+        
+        # 检查实际请求中的 cookie
+        loguru.logger.debug(f"[H2 Client Cookies] {dict(client.cookies)}")
+        
         if method.lower() == "post":
             return (
                 client.post(url, json=data) if isJson else client.post(url, data=data)
@@ -242,9 +246,43 @@ class BiliRequest:
         response.raise_for_status()
         self.clear_request_count()
         self.mark_current_proxy_success()
+        self._sync_response_cookies(response)
         if response.json().get("msg", "") == "请先登录":
             raise RuntimeError("当前未登录，请重新登陆")
         return response
+
+    def _sync_response_cookies(self, response):
+        """将服务器下发的 Set-Cookie 同步到 CookieManager"""
+        if not response.cookies:
+            return
+        try:
+            current_cookies = self.cookieManager.get_cookies(force=True)
+        except RuntimeError:
+            return
+
+        current_names = {c["name"] for c in current_cookies}
+        updated = False
+        for name, value in response.cookies.items():
+            if name not in current_names:
+                current_cookies.append({"name": name, "value": value})
+                loguru.logger.debug(f"新增Cookie: {name}={value[:30]}...")
+                updated = True
+
+        if updated:
+            self.cookieManager.db.insert(self.cookieManager._COOKIE_KEY, current_cookies)
+
+    def get_all_cookies(self) -> list[dict]:
+        """获取所有Cookie（CookieManager + Session），用于调试"""
+        result = {}
+        try:
+            for c in self.cookieManager.get_cookies():
+                result[c["name"]] = c["value"]
+        except RuntimeError:
+            pass
+        for cookie in self.session.cookies:
+            if cookie.name not in result:
+                result[cookie.name] = cookie.value
+        return [{"name": k, "value": v} for k, v in result.items()]
 
     def get_request_name(self):
         try:

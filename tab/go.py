@@ -1,4 +1,4 @@
-import datetime
+﻿import datetime
 import html
 import json
 import os
@@ -141,6 +141,69 @@ def _build_session_ticket_preview() -> str:
 
 
 def go_start_tab():
+    auto_fill_time_default = ConfigDB.get("autoFillTime")
+    if auto_fill_time_default is None:
+        auto_fill_time_default = True
+
+    def get_proxy_status():
+        """获取代理状态信息"""
+        try:
+            from util.proxy.ProxyTester import ProxyTester
+            from util import GlobalStatusInstance
+            https_proxys = ConfigDB.get("https_proxy") or ""
+            if not https_proxys.strip():
+                return '<div class="btb-card-note">未配置代理，使用直连</div>'
+
+            proxy_list = [p.strip() for p in https_proxys.split(",") if p.strip()]
+            if not proxy_list:
+                return '<div class="btb-card-note">未配置代理，使用直连</div>'
+
+            tester = ProxyTester(timeout=5)
+            results = []
+            for proxy in proxy_list:
+                result = tester.test_single_proxy(proxy)
+                # 获取代理使用情况
+                usage = GlobalStatusInstance.get_proxy_usage(proxy)
+                result["usage"] = usage
+                results.append(result)
+
+            html_parts = ['<div class="btb-proxy-status">']
+            html_parts.append('<h4>代理状态</h4>')
+            html_parts.append('<table style="width:100%; border-collapse:collapse;">')
+            html_parts.append('<tr style="border-bottom:1px solid #3b4252;">')
+            html_parts.append('<th style="text-align:left; padding:8px;">代理</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">连通性</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">延时</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">使用状态</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">出口IP</th>')
+            html_parts.append('</tr>')
+
+            for r in results:
+                status_color = "#a3be8c" if r["status"] == "success" else "#bf616a"
+                status_text = "正常" if r["status"] == "success" else "不可用"
+                latency = f"{r['response_time']}ms" if r["response_time"] else "-"
+                ip_info = r.get("ip_info", "-") or "-"
+                usage = r.get("usage", [])
+                if usage:
+                    usage_text = f"使用中 ({len(usage)}个任务)"
+                    usage_color = "#ebcb8b"
+                else:
+                    usage_text = "空闲"
+                    usage_color = "#a3be8c"
+
+                html_parts.append('<tr style="border-bottom:1px solid #2e3440;">')
+                html_parts.append(f'<td style="padding:8px;">{r["proxy"]}</td>')
+                html_parts.append(f'<td style="padding:8px; color:{status_color};">{status_text}</td>')
+                html_parts.append(f'<td style="padding:8px;">{latency}</td>')
+                html_parts.append(f'<td style="padding:8px; color:{usage_color};">{usage_text}</td>')
+                html_parts.append(f'<td style="padding:8px; font-size:0.9em;">{ip_info}</td>')
+                html_parts.append('</tr>')
+
+            html_parts.append('</table>')
+            html_parts.append('</div>')
+            return "".join(html_parts)
+        except Exception as e:
+            return f'<div class="btb-card-note">获取代理状态失败: {e}</div>'
     with gr.Column(elem_classes="btb-page-section"):
         with gr.Column(elem_classes="btb-card btb-card-sky btb-layout-card"):
             with gr.Row(elem_classes="!items-stretch !gap-3"):
@@ -155,6 +218,22 @@ def go_start_tab():
                         value=_build_session_ticket_preview,
                         visible=True,
                     )
+            # 代理状态显示区域
+            proxy_status_ui = gr.HTML(
+                value=get_proxy_status,
+                label="代理状态",
+            )
+            refresh_proxy_btn = gr.Button(
+                "刷新代理状态",
+                elem_classes="btb-soft-button",
+                scale=0,
+                min_width=150,
+            )
+            refresh_proxy_btn.click(
+                fn=get_proxy_status,
+                inputs=None,
+                outputs=proxy_status_ui,
+            )
             with gr.Column(elem_classes="btb-card btb-card-sky btb-layout-card"):
                 gr.HTML(
                     """
@@ -333,6 +412,24 @@ def go_start_tab():
                 max_log_files=ConfigDB.get_as_int("maxLogFiles", DEFAULT_MAX_LOG_FILES),
                 max_run_dirs=ConfigDB.get_as_int("maxRunDirs", DEFAULT_MAX_RUN_DIRS),
             )
+
+        # 检查代理数量限制
+        available_proxies = len(https_proxy_list)  # 包含 "none" 直连
+        running_tasks = [t for t in GlobalStatusInstance.get_task_logs() if t.status == "运行中"]
+        running_task_count = len(running_tasks)
+        max_concurrent_tasks = available_proxies  # 每个终端需要一个代理
+
+        if running_task_count >= max_concurrent_tasks:
+            gr.Warning(f"代理数量不足！当前有 {running_task_count} 个运行中的任务，但只有 {available_proxies} 个可用代理。请先停止部分任务后再启动新任务。")
+            return gr.update(visible=True)
+
+        # 检查要启动的任务数量是否超过限制
+        tasks_to_start = len(files)
+        if running_task_count + tasks_to_start > max_concurrent_tasks:
+            allowed_tasks = max_concurrent_tasks - running_task_count
+            gr.Warning(f"代理数量不足！只能再启动 {allowed_tasks} 个任务（当前运行 {running_task_count} 个，代理总数 {available_proxies} 个）。")
+            files = files[:allowed_tasks]
+
         if proxy_assignment_strategy == "queue":
             worker_count = len(https_proxy_list)
             if queue_concurrency_limit > 0:

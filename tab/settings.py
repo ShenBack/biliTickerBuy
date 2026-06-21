@@ -2,6 +2,8 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -35,8 +37,9 @@ project_id = 0
 is_hot_project = False
 
 
-def _format_account_choice(uid: str, name: str, level: int) -> str:
-    return f"{uid} - {name} (Lv{level})"
+def _format_account_choice(uid: str, name: str, level: int, is_vip: bool = False) -> str:
+    vip_tag = "-大会员" if is_vip else ""
+    return f"{uid} - {name} (Lv{level}){vip_tag}"
 
 
 def _find_uid_from_choice(choice: str) -> str:
@@ -228,6 +231,56 @@ def _format_ticket_option(screen_name: str, ticket: dict, ticket_price: int) -> 
     )
 
 
+def _load_people_records() -> list[dict]:
+    people_path = os.path.join(util.EXE_PATH, "people.json")
+    if not os.path.exists(people_path):
+        return []
+    try:
+        with open(people_path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    records = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        personal_id = item.get("personal_id")
+        if name and personal_id:
+            records.append({"name": name, "personal_id": personal_id})
+    return records
+
+
+def _render_people_cards_html(records: list[dict] | None = None) -> str:
+    if records is None:
+        records = _load_people_records()
+    if not records:
+        return (
+            '<div class="btb-people-empty">'
+            "<span>暂无实名购票人数据，请先点击“从B站导入实名购票人(完整身份证)”</span>"
+            "</div>"
+        )
+    cards = []
+    for idx, item in enumerate(records, start=1):
+        name = html.escape(str(item.get("name", "")))
+        personal_id_raw = str(item.get("personal_id", ""))
+        cards.append(
+            '<div class="btb-people-card">'
+            f'<div class="btb-people-index">#{idx}</div>'
+            f'<div class="btb-people-name">{name}</div>'
+            f'<div class="btb-people-id">{html.escape(personal_id_raw)}</div>'
+            "</div>"
+        )
+    return (
+        '<div class="btb-people-grid-view">'
+        f'<div class="btb-people-count">共 {len(records)} 位实名购票人</div>'
+        f'<div class="btb-people-cards">{"".join(cards)}</div>'
+        "</div>"
+    )
+
+
 def _resolve_project_input(project_input: Any) -> tuple[int, int | str, str]:
     if isinstance(project_input, int):
         return project_input, project_input, ""
@@ -271,6 +324,14 @@ def on_submit_ticket_id(num):
     global project_id
     global is_hot_project
 
+    logger.info(f"[获取票务信息] 按钮点击，输入值: {repr(num)}")
+    logger.info(f"[获取票务信息] main_request 已登录: {util.main_request.cookieManager.have_cookies()}")
+    try:
+        current_name = util.main_request.get_request_name()
+    except Exception:
+        current_name = "<获取失败>"
+    logger.info(f"[获取票务信息] 当前账号: {current_name}")
+
     def _raise_login_error(exc: Exception) -> None:
         message = str(exc).strip()
         if "当前未登录" in message or "请先登录" in message or "请重新登陆" in message:
@@ -283,10 +344,13 @@ def on_submit_ticket_id(num):
         addr_value = []
         ticket_value = []
         _, num, extracted_id_message = _resolve_project_input(num)
+        logger.info(f"[获取票务信息] 解析后项目ID: {num}, 提示: {extracted_id_message}")
 
         try:
             data = fetch_project_payload(request=util.main_request, project_id=num)
+            logger.info(f"[获取票务信息] 项目获取成功: {data.get('name', '?')}, screen_list 数量: {len(data.get('screen_list', []))}")
         except Exception as exc:
+            logger.error(f"[获取票务信息] fetch_project_payload 失败: {exc}")
             raise gr.Error(
                 str(exc) or "票务信息返回异常，当前活动页暂时不可用。"
             ) from exc
@@ -359,13 +423,17 @@ def on_submit_ticket_id(num):
                 )
 
         try:
+            logger.info(f"[获取票务信息] 请求购票人列表, project_id={project_id}")
             buyer_json = util.main_request.get(
                 url=f"https://show.bilibili.com/api/ticket/buyer/list?is_default&projectId={project_id}"
             ).json()
+            logger.info(f"[获取票务信息] 购票人列表返回: code={buyer_json.get('code')}, 购票人数={len(buyer_json.get('data', {}).get('list', []))}")
             addr_json = util.main_request.get(
                 url="https://show.bilibili.com/api/ticket/addr/list"
             ).json()
+            logger.info(f"[获取票务信息] 地址列表返回: code={addr_json.get('code')}, 地址数={len(addr_json.get('data', {}).get('addr_list', []))}")
         except Exception as exc:
+            logger.error(f"[获取票务信息] 购票人/地址请求失败: {exc}")
             _raise_login_error(exc)
             raise
 
@@ -374,6 +442,26 @@ def on_submit_ticket_id(num):
             f"{item['name']}-{item['personal_id']}" for item in buyer_value
         ]
         addr_value = addr_json["data"]["addr_list"]
+        
+        # Cookie 同步：打印当前所有 Cookie（调试用途）
+        logger.info("=" * 60)
+        logger.info("[Cookie 同步] 选票信息加载完成，当前所有 Cookie：")
+        for cookie in util.main_request.cookieManager.get_cookies(force=True) or []:
+            logger.info(f"  {cookie.get('name')}: {cookie.get('value', '')[:50]}{'...' if len(cookie.get('value', '')) > 50 else ''}")
+        logger.info("=" * 60)
+        
+        # 地址空值兜底
+        if not addr_value:
+            addr_value = [{
+                "id": "default",
+                "name": "SX",
+                "phone": "18888888888",
+                "prov": "浙江省",
+                "city": "宁波市",
+                "area": "余姚市",
+                "addr": "红旗路144号碧桂园"
+            }]
+        
         addr_str_list = [
             f"{item['addr']}-{item['name']}-{item['phone']}" for item in addr_value
         ]
@@ -400,6 +488,7 @@ def on_submit_ticket_id(num):
             else gr.update(choices=[], visible=False, value=None),
         ]
     except gr.Error as exc:
+        logger.warning(f"[获取票务信息] gr.Error: {exc.message}")
         gr.Warning(exc.message)
         yield _empty_ticket_info_updates()
     except Exception as exc:
@@ -408,10 +497,11 @@ def on_submit_ticket_id(num):
             or "请先登录" in str(exc)
             or "请重新登陆" in str(exc)
         ):
+            logger.warning(f"[获取票务信息] 未登录: {exc}")
             gr.Warning("当前未登录或登录状态已失效，请先在“账号登录”页重新登录。")
             yield _empty_ticket_info_updates()
             return
-        logger.exception(exc)
+        logger.exception(f"[获取票务信息] 未知异常: {exc}")
         gr.Warning("获取票务信息失败，请确认活动链接是否正确，或稍后重试。")
         yield _empty_ticket_info_updates()
 
@@ -499,7 +589,7 @@ def on_submit_all(
             "deliver_info": {
                 "name": address_cur["name"],
                 "tel": address_cur["phone"],
-                "addr_id": address_cur["id"],
+                "addr_id": 34309219 if address_cur["id"] == "default" else address_cur["id"],
                 "addr": address_cur["prov"]
                 + address_cur["city"]
                 + address_cur["area"]
@@ -536,7 +626,7 @@ def upload_file(filepath):
         gr.Info(f"已导入账号 {account.name}", duration=5)
 
         new_choices = [
-            _format_account_choice(a.uid, a.name, a.level)
+            _format_account_choice(a.uid, a.name, a.level, a.is_vip)
             for a in util.main_request.cookieManager.get_accounts()
         ]
         yield [
@@ -549,6 +639,86 @@ def upload_file(filepath):
     except Exception as exc:
         logger.exception(exc)
         raise gr.Error("登录信息导入失败，请检查文件格式。")
+
+
+def _find_browser_exe() -> str | None:
+    candidates = [
+        shutil.which("msedge"),
+        shutil.which("chrome"),
+        os.path.expandvars(
+            r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"
+        ),
+        os.path.expandvars(
+            r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
+        ),
+        os.path.expandvars(
+            r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+        ),
+        os.path.expandvars(
+            r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+        ),
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def _open_bilibili_with_cookies():
+    cookies = util.main_request.cookieManager.get_cookies(force=True)
+    if not cookies:
+        gr.Warning("当前无登录信息，请先登录", duration=5)
+        return
+
+    # 生成 JS 脚本：设置 cookie 并刷新
+    js_parts = []
+    for c in cookies:
+        name = c["name"]
+        value = c["value"]
+        # 单引号转义
+        safe_value = value.replace("'", "\\'")
+        js_parts.append(
+            f"document.cookie='{name}={safe_value}; domain=.bilibili.com; path=/; max-age=31536000';"
+        )
+    js_parts.append("location.reload();")
+    js_script = "\n".join(js_parts)
+
+    # 复制到剪贴板
+    try:
+        subprocess.run(
+            ["cmd", "/c", "clip"],
+            input=js_script.encode("utf-16-le"),
+            check=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+    # 启动浏览器：自动打开 DevTools + 禁用控制台粘贴警告
+    browser_exe = _find_browser_exe()
+    if not browser_exe:
+        import webbrowser
+        webbrowser.open("https://www.bilibili.com")
+    else:
+        profile_dir = os.path.join(TEMP_PATH, "bili_browser_profile")
+        subprocess.Popen(
+            [
+                browser_exe,
+                f"--user-data-dir={profile_dir}",
+                "--auto-open-devtools-for-tabs",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-features=DevToolsConsoleWarning",
+                "--disable-popup-blocking",
+                "https://www.bilibili.com",
+            ]
+        )
+
+    gr.Info(
+        "已打开 B 站并将 Cookie 脚本复制到剪贴板。\n"
+        "在打开的 DevTools Console 中 Ctrl+V 粘贴并回车即可登录。",
+        duration=10,
+    )
 
 
 def login_tab():
@@ -638,7 +808,10 @@ def login_tab():
 
         def _get_account_choices():
             accounts = util.main_request.cookieManager.get_accounts()
-            return [_format_account_choice(a.uid, a.name, a.level) for a in accounts]
+            return [_format_account_choice(a.uid, a.name, a.level, a.is_vip) for a in accounts]
+
+        def _get_default_account_choice() -> str | None:
+            return _get_default_account_choice_from(_get_account_choices())
 
         def _get_default_account_choice_from(choices: list[str]) -> str | None:
             active_uid = None
@@ -706,7 +879,19 @@ def login_tab():
                         variant="stop",
                     )
                     upload_ui = gr.UploadButton(
-                        label="导入现有登录文件",
+                        "导入现有登录文件",
+                        elem_classes="btb-soft-button",
+                    )
+                    open_browser_btn = gr.Button(
+                        "用Cookie打开B站",
+                        elem_classes="btb-soft-button",
+                    )
+                    refresh_btn = gr.Button(
+                        "刷新账号列表",
+                        elem_classes="btb-soft-button",
+                    )
+                    import_people_btn = gr.Button(
+                        "从B站导入实名购票人(完整身份证)",
                         elem_classes="btb-soft-button",
                     )
                 gr_file_ui = gr.File(
@@ -770,16 +955,23 @@ def login_tab():
         def on_dropdown_change(choice):
             uid = _find_uid_from_choice(choice)
             if not uid:
-                return [gr.update(), gr.update()]
+                return [gr.update(), gr.update(), _render_people_cards_html()]
             account = util.main_request.cookieManager.find_by_uid(uid)
             if account is None:
                 gr.Warning(f"未找到账号 {uid}", duration=5)
-                return [gr.update(), gr.update()]
+                return [gr.update(), gr.update(), _render_people_cards_html()]
             _activate_account(account)
-            gr.Info(f"已切换到账号 {account.name}", duration=5)
+            gr.Info(f"已切换到账号 {account.name}，正在刷新实名购票人...", duration=3)
+            try:
+                _, records = _import_people_from_bili()
+                gr.Info(f"已切换到 {account.name}，导入 {len(records)} 位实名购票人", duration=5)
+                people_html = _render_people_cards_html(records)
+            except gr.Error:
+                people_html = _render_people_cards_html()
             return [
                 gr.update(value=GLOBAL_COOKIE_PATH),
                 gr.update(),
+                people_html,
             ]
 
         def on_delete_account(choice):
@@ -831,6 +1023,48 @@ def login_tab():
                 gr.update(),
             ]
 
+        def on_refresh_accounts():
+            set_main_request(BiliRequest(cookies_config_path=GLOBAL_COOKIE_PATH))
+            new_choices = _get_account_choices()
+            gr.Info(f"已刷新账号列表，共 {len(new_choices)} 个账号", duration=3)
+            return gr.update(
+                choices=new_choices,
+                value=_get_default_account_choice_from(new_choices),
+            )
+
+        def _import_people_from_bili() -> tuple[str, list[dict]]:
+            url = "https://show.bilibili.com/api/ticket/buyer/list?nomask=1"
+            resp = util.main_request.get(url=url).json()
+            if resp.get("errno") not in (0, 1) or not resp.get("data"):
+                raise gr.Error(
+                    f"导入失败：{resp.get('msg') or resp.get('message') or '未知错误'}"
+                )
+            people_list = resp["data"].get("list") or []
+            if not people_list:
+                raise gr.Error("未获取到任何实名购票人信息")
+            records = []
+            for item in people_list:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                personal_id = item.get("personal_id")
+                if name and personal_id:
+                    records.append({"name": name, "personal_id": personal_id})
+            if not records:
+                raise gr.Error("接口未返回有效的姓名/身份证信息")
+            people_path = os.path.join(util.EXE_PATH, "people.json")
+            with open(people_path, "w", encoding="utf-8") as fp:
+                json.dump(records, fp, ensure_ascii=False, indent=2)
+            return people_path, records
+
+        def on_import_people():
+            people_path, records = _import_people_from_bili()
+            gr.Info(
+                f"已从 B 站导入 {len(records)} 位实名购票人，保存到 {people_path}",
+                duration=5,
+            )
+            return people_path, _render_people_cards_html(records)
+
         login_btn.click(on_login_click, outputs=[qr_img, qrcode_key_state])
 
         @gr.on(qrcode_key_state.change, inputs=qrcode_key_state, outputs=check_btn)
@@ -848,17 +1082,43 @@ def login_tab():
                 qrcode_key_state,
             ],
         )
-        account_dropdown.change(
-            on_dropdown_change,
-            inputs=[account_dropdown],
-            outputs=[gr_file_ui, account_dropdown],
-        )
         delete_btn.click(
             on_delete_account,
             inputs=[account_dropdown],
             outputs=[gr_file_ui, account_dropdown, qr_img],
         )
         upload_ui.upload(upload_file, [upload_ui], [gr_file_ui, account_dropdown])
+        open_browser_btn.click(fn=_open_bilibili_with_cookies)
+        refresh_btn.click(
+            on_refresh_accounts,
+            inputs=None,
+            outputs=[account_dropdown],
+        )
+
+        with gr.Column(elem_classes="btb-card btb-card-sky btb-layout-card"):
+            gr.HTML(
+                """
+                <div class="btb-card-head">
+                    <div>
+                        <h3>实名购票人</h3>
+                        <p>从 people.json 读取。</p>
+                    </div>
+                </div>
+                """
+            )
+            people_cards_html = gr.HTML(value=_render_people_cards_html())
+
+        import_people_btn.click(
+            on_import_people,
+            inputs=None,
+            outputs=[gr.File(visible=False), people_cards_html],
+        )
+
+        account_dropdown.change(
+            on_dropdown_change,
+            inputs=[account_dropdown],
+            outputs=[gr_file_ui, account_dropdown, people_cards_html],
+        )
     return load_login_accounts, [account_dropdown]
 
 
@@ -876,10 +1136,16 @@ def setting_tab():
                 """
             )
             with gr.Row(elem_classes="btb-action-band !items-end"):
-                ticket_id_ui = gr.Textbox(
+                ticket_id_ui = gr.Dropdown(
                     label="想抢票的活动链接",
+                    info="预置：1001701=2026BML，1001653=2026BW；可手动输入其它活动链接。",
                     interactive=True,
-                    placeholder="https://show.bilibili.com/platform/detail.html?id=xxxx",
+                    choices=[
+                        "https://show.bilibili.com/platform/detail.html?id=1001701",
+                        "https://show.bilibili.com/platform/detail.html?id=1001653",
+                    ],
+                    value="https://show.bilibili.com/platform/detail.html?id=1001701",
+                    allow_custom_value=True,
                     scale=5,
                 )
                 ticket_id_btn = gr.Button(
@@ -911,13 +1177,13 @@ def setting_tab():
 
                 with gr.Row(elem_classes="btb-split-grid !items-end"):
                     people_buyer_name = gr.Textbox(
-                        value=lambda: ConfigDB.get("people_buyer_name") or "",
+                        value=lambda: ConfigDB.get("people_buyer_name") or "SX",
                         label="联系人姓名",
                         placeholder="请输入姓名",
                         interactive=True,
                     )
                     people_buyer_phone = gr.Textbox(
-                        value=lambda: ConfigDB.get("people_buyer_phone") or "",
+                        value=lambda: ConfigDB.get("people_buyer_phone") or "18888888888",
                         label="联系人电话",
                         placeholder="请输入电话",
                         interactive=True,
