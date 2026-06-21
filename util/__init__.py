@@ -140,6 +140,7 @@ class GlobalStatus:
     nowTask: str = "none"
     task_logs: list[TaskLogEntry] = field(default_factory=list)
     runtime_state: RuntimeStateStore = field(default_factory=RuntimeStateStore)
+    proxy_usage: dict[str, list[str]] = field(default_factory=dict)  # proxy -> [task_names]
 
     def state_set(self, key: str, value: Any) -> None:
         self.runtime_state.set(key, value)
@@ -207,6 +208,28 @@ class GlobalStatus:
                 if status != "运行中":
                     entry.finished_at = time.time()
                 return
+
+    def register_proxy_usage(self, proxy: str, task_name: str) -> None:
+        """注册代理使用"""
+        if proxy not in self.proxy_usage:
+            self.proxy_usage[proxy] = []
+        if task_name not in self.proxy_usage[proxy]:
+            self.proxy_usage[proxy].append(task_name)
+
+    def unregister_proxy_usage(self, proxy: str, task_name: str) -> None:
+        """注销代理使用"""
+        if proxy in self.proxy_usage:
+            self.proxy_usage[proxy] = [t for t in self.proxy_usage[proxy] if t != task_name]
+            if not self.proxy_usage[proxy]:
+                del self.proxy_usage[proxy]
+
+    def get_proxy_usage(self, proxy: str) -> list[str]:
+        """获取代理使用情况"""
+        return self.proxy_usage.get(proxy, [])
+
+    def get_all_proxy_usage(self) -> dict[str, list[str]]:
+        """获取所有代理使用情况"""
+        return dict(self.proxy_usage)
 
 
 GlobalStatusInstance = GlobalStatus()

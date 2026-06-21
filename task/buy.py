@@ -50,6 +50,11 @@ class BuyStreamState:
     payment_qr_url: str | None = None
     status: str = "running"
     last_message: str = ""
+    buyer_name: str = ""
+    ticket_type: str = ""
+    show_time: str = ""
+    account_name: str = ""
+    fixed_proxy: str = ""
 
 
 @dataclass
@@ -260,11 +265,13 @@ def _summarize_non_json_response(prefix: str, diagnostic: str) -> str:
         return f"{prefix}触发 412 风控"
 
     content_type = "未知"
+    status_code = "未知"
     for part in diagnostic.split(", "):
         if part.startswith("content_type="):
             content_type = part.split("=", 1)[1]
-            break
-    return f"{prefix}返回了非 JSON 响应（{content_type}）"
+        elif part.startswith("status="):
+            status_code = part.split("=", 1)[1]
+    return f"{prefix}返回了非 JSON 响应（status={status_code}, content_type={content_type}）"
 
 
 def _build_proxy_exhausted_message(_request: BiliRequest, delay_seconds: int) -> str:
@@ -297,6 +304,7 @@ def _handle_proxy_failure(
     reason: str,
     proxy_backoff: ProxyBackoff,
     notifier_config: NotifierConfig,
+    fixed_proxy: bool = False,
 ) -> tuple[str | None, int | None]:
     """Handle a proxy failure and return the immediate status plus cooldown plan."""
     previous_proxy = _request.current_proxy_display()
@@ -305,6 +313,14 @@ def _handle_proxy_failure(
         immediate_message = f"代理冷却: {previous_proxy} 短时间内连续失败，已暂时停用"
     else:
         immediate_message = None
+
+    # 如果是固定代理模式，不切换代理，等待冷却后继续使用
+    if fixed_proxy:
+        delay_seconds = proxy_backoff.next_delay_seconds()
+        cooldown_message = f"固定代理模式: {previous_proxy} 失败，休息 {delay_seconds} 秒后重试"
+        if immediate_message:
+            return f"{immediate_message}\n{cooldown_message}", delay_seconds
+        return cooldown_message, delay_seconds
 
     if _request.switch_proxy():
         proxy_backoff.reset()
@@ -395,6 +411,7 @@ def buy_stream(
     proxy_cooldown_seconds: int = 180,
     proxy_backoff_max_seconds: int = 600,
     auto_open_payment_url: bool = False,
+    fixed_proxy: bool = True,
 ):
     state = BuyStreamState()
 
@@ -437,6 +454,7 @@ def buy_stream(
             reason,
             proxy_backoff,
             notifier_config,
+            fixed_proxy=fixed_proxy,
         )
         attempt_total = (
             effective_retry_limit if attempt is not None else state.attempt_total
@@ -488,6 +506,8 @@ def buy_stream(
     ) -> Generator[object, None, bool]:
         diagnostic = _request.describe_non_json_response(response)
         summary = _summarize_non_json_response(prefix, diagnostic)
+        logger.warning(f"[{prefix}] 非JSON响应详情: status={response.status_code}, content_type={response.headers.get('Content-Type', '未知')}, url={response.url}")
+        logger.warning(f"[{prefix}] 响应体内容:\n{response.text[:2000] if response.text else '<empty>'}")
         # 出现 412 风控时，走代理失败处理，切换代理或进入冷却等待。
         if "412 风控" in summary:
             yield emit(
@@ -520,6 +540,17 @@ def buy_stream(
     tickets_info = json.loads(tickets_info)
     detail = tickets_info["detail"]
     cookies = tickets_info["cookies"]
+
+    # 初始化关键信息到 state
+    state.account_name = tickets_info.get("username", "")
+    # 从 buyer_info 提取购票人实名信息
+    buyer_info = tickets_info.get("buyer_info", [])
+    if isinstance(buyer_info, list) and buyer_info:
+        buyer_names = [b.get("name", "") for b in buyer_info if b.get("name")]
+        state.buyer_name = "实名：" + "、".join(buyer_names) if buyer_names else ""
+    # 票种使用完整 detail 信息
+    state.ticket_type = detail
+    state.show_time = tickets_info.get("sale_start", "")
     tickets_info.pop("cookies", None)
     tickets_info["_prepare_buyer_info"] = copy.deepcopy(tickets_info["buyer_info"])
     tickets_info["buyer_info"] = json.dumps(tickets_info["buyer_info"])
@@ -532,6 +563,19 @@ def buy_stream(
         proxy_failure_threshold=proxy_max_consecutive_failures,
         proxy_cooldown_seconds=proxy_cooldown_seconds,
     )
+    # 启动时随机分配一个固定代理
+    if _request.proxy_manager.proxy_list and len(_request.proxy_manager.proxy_list) > 1:
+        random_idx = randint(0, len(_request.proxy_manager.proxy_list) - 1)
+        _request.proxy_manager.now_proxy_idx = random_idx
+        _request.proxy_manager.apply_to_session(_request.session)
+        logger.info(f"[代理分配] 本次终端固定使用代理: {_request.proxy_manager.current_proxy_display}")
+    state.fixed_proxy = _request.proxy_manager.current_proxy_display
+
+    # 注册代理使用
+    from util import GlobalStatusInstance
+    task_name = detail[:30] if len(detail) > 30 else detail
+    GlobalStatusInstance.register_proxy_usage(_request.proxy_manager.current_proxy, task_name)
+
     proxy_backoff = ProxyBackoff(max_seconds=proxy_backoff_max_seconds)
     is_hot_project = bool(tickets_info.get("is_hot_project", False))
     _request.use_h2 = is_hot_project
@@ -614,6 +658,8 @@ def buy_stream(
                 yield emit("stage", "开始准备订单", stage="订单准备")
                 prepare_ctoken_state = ticket_state.snapshot(now_ms=ticket_collection_t)
                 token_payload["token"] = prepare_ctoken_state.generate_prepare_ctoken()
+                logger.info(f"[订单准备] 请求项目ID: {tickets_info['project_id']}")
+                logger.debug(f"[订单准备] 请求参数: {json.dumps(token_payload, ensure_ascii=False, indent=2)}")
                 request_result_normal = _request.post(
                     url=f"{base_url}/api/ticket/order/prepare?project_id={tickets_info['project_id']}",
                     data=token_payload,
@@ -621,6 +667,7 @@ def buy_stream(
                 )
                 request_result = request_result_normal.json()
                 proxy_backoff.reset()
+                logger.info(f"[订单准备] 响应结果:\n{json.dumps(request_result, ensure_ascii=False, indent=2)}")
                 yield emit(
                     "status",
                     _format_status_result(
@@ -629,7 +676,7 @@ def buy_stream(
                     ),
                 )
                 order_token = request_result["data"]["token"]  # type: ignore
-                logger.info(f"token: {order_token}")
+                logger.info(f"[订单准备] 获取token成功: {order_token}")
 
             else:
                 # normal
@@ -684,6 +731,8 @@ def buy_stream(
                         yield "抢票结束"
                         break
                     try:
+                        logger.info(f"[创建订单] 第{attempt}次尝试, URL: {url}")
+                        logger.debug(f"[创建订单] 请求参数:\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
                         create_response = _request.post(
                             url=url,
                             data=payload,
@@ -693,7 +742,9 @@ def buy_stream(
                         proxy_backoff.reset()
                         err = int(ret.get("errno", ret.get("code")))
                         retry_outcome.set_response(err, ret)
+                        logger.info(f"[创建订单] 响应结果:\n{json.dumps(ret, ensure_ascii=False, indent=2)}")
                         if _is_create_success(ret, err):
+                            logger.info(f"[创建订单] 成功! 完整响应:\n{json.dumps(ret, ensure_ascii=False, indent=2)}")
                             yield emit(
                                 "success",
                                 "创建订单成功",
@@ -704,6 +755,7 @@ def buy_stream(
                             break
                         terminal_rule = _create_order_terminal_rule(err)
                         if terminal_rule is not None:
+                            logger.warning(f"[创建订单] 命中终止规则: errno={err}, message={terminal_rule.message}\n完整响应:\n{json.dumps(ret, ensure_ascii=False, indent=2)}")
                             terminal_result = (err, ret, terminal_rule)
                             yield emit(
                                 "status",
@@ -718,6 +770,7 @@ def buy_stream(
                             )
                             break
                         if err == 100051:
+                            logger.warning("[创建订单] token过期，需要重新准备订单")
                             yield emit("status", "token过期，需要重新准备订单")
                             token_expired = True
                             break
@@ -820,6 +873,7 @@ def buy_stream(
                             except Exception as exc:
                                 yield emit("status", f"自动打开订单链接失败: {exc}")
                     break
+                logger.warning(f"[外层循环] 本轮创建订单未成功，{_format_retry_reason(retry_outcome)}，重新准备订单")
                 yield emit(
                     "status",
                     "本轮创建订单未成功，"
@@ -829,10 +883,18 @@ def buy_stream(
             # win了
             request_result, errno = result
             if errno == 0:
+                logger.info(f"[抢票成功] 创建订单成功，完整响应:\n{json.dumps(request_result, ensure_ascii=False, indent=2)}")
+                # 构建推送内容，包含购票人、票种等信息
+                notify_content = f"**票种信息：**{detail}\n"
+                if state.buyer_name:
+                    notify_content += f"**购票人：**{state.buyer_name}\n"
+                if state.account_name:
+                    notify_content += f"**购票账号：**{state.account_name}\n"
+                notify_content += f"\n请尽快前往订单中心付款"
                 notifierManager = NotifierManager.create_from_config(
                     config=notifier_config,
                     title="抢票成功",
-                    content=f"bilibili会员购，请尽快前往订单中心付款: {detail}",
+                    content=notify_content,
                 )
 
                 notifierManager.start_all()
@@ -844,11 +906,14 @@ def buy_stream(
                     status="succeeded",
                 )
                 order_id = request_result["data"]["orderId"]  # type: ignore
+                logger.info(f"[抢票成功] 订单ID: {order_id}")
                 payment_url = get_order_detail_url(order_id)
+                logger.info(f"[抢票成功] 订单详情页: {payment_url}")
                 qrcode_url = get_qrcode_url(
                     _request,
                     order_id,
                 )
+                logger.info(f"[抢票成功] 支付二维码URL: {qrcode_url}")
                 yield emit(
                     "payment_qr",
                     "PAYMENT_QR_URL={0}".format(payment_url),
@@ -884,6 +949,9 @@ def buy_stream(
             logger.exception(e)
             yield emit("error", f"程序异常: {repr(e)}", status="failed")
 
+    # 注销代理使用
+    GlobalStatusInstance.unregister_proxy_usage(_request.proxy_manager.current_proxy, task_name)
+
 
 def buy(
     tickets_info,
@@ -899,6 +967,7 @@ def buy(
     ntfy_username=None,
     ntfy_password=None,
     meowNickname=None,
+    feishuWebhook=None,
     notify_proxy_exhausted=False,
     show_random_message=True,
     show_qrcode=True,
@@ -920,6 +989,7 @@ def buy(
         ntfy_username=ntfy_username,
         ntfy_password=ntfy_password,
         meow_nickname=meowNickname,
+        feishu_webhook=feishuWebhook,
         audio_path=audio_path,
         notify_proxy_exhausted=notify_proxy_exhausted,
     )
@@ -959,6 +1029,7 @@ def buy_new_terminal(
     ntfy_username=None,
     ntfy_password=None,
     meowNickname=None,
+    feishuWebhook=None,
     notify_proxy_exhausted=False,
     show_random_message=True,
     show_qrcode=True,
@@ -1024,6 +1095,8 @@ def buy_new_terminal(
         command.extend(["--ntfy_password", ntfy_password])
     if meowNickname:
         command.extend(["--meowNickname", meowNickname])
+    if feishuWebhook:
+        command.extend(["--feishuWebhook", feishuWebhook])
     if notify_proxy_exhausted:
         command.append("--notify_proxy_exhausted")
     if https_proxys:

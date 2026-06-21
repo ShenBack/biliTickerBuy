@@ -299,7 +299,6 @@ def ticker_cmd(args: Namespace):
         server_name=args.server_name,
         server_port=args.port,
         prevent_thread_lock=True,
-        show_api=False,
     )
     attach_log_routes(demo.app)
     try:

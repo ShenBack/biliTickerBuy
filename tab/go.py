@@ -160,6 +160,66 @@ def go_start_tab():
     if auto_fill_time_default is None:
         auto_fill_time_default = True
 
+    def get_proxy_status():
+        """获取代理状态信息"""
+        try:
+            from util.ProxyTester import ProxyTester
+            from util import GlobalStatusInstance
+            https_proxys = ConfigDB.get("https_proxy") or ""
+            if not https_proxys.strip():
+                return '<div class="btb-card-note">未配置代理，使用直连</div>'
+
+            proxy_list = [p.strip() for p in https_proxys.split(",") if p.strip()]
+            if not proxy_list:
+                return '<div class="btb-card-note">未配置代理，使用直连</div>'
+
+            tester = ProxyTester(timeout=5)
+            results = []
+            for proxy in proxy_list:
+                result = tester.test_single_proxy(proxy)
+                # 获取代理使用情况
+                usage = GlobalStatusInstance.get_proxy_usage(proxy)
+                result["usage"] = usage
+                results.append(result)
+
+            html_parts = ['<div class="btb-proxy-status">']
+            html_parts.append('<h4>代理状态</h4>')
+            html_parts.append('<table style="width:100%; border-collapse:collapse;">')
+            html_parts.append('<tr style="border-bottom:1px solid #3b4252;">')
+            html_parts.append('<th style="text-align:left; padding:8px;">代理</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">连通性</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">延时</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">使用状态</th>')
+            html_parts.append('<th style="text-align:left; padding:8px;">出口IP</th>')
+            html_parts.append('</tr>')
+
+            for r in results:
+                status_color = "#a3be8c" if r["status"] == "success" else "#bf616a"
+                status_text = "正常" if r["status"] == "success" else "不可用"
+                latency = f"{r['response_time']}ms" if r["response_time"] else "-"
+                ip_info = r.get("ip_info", "-") or "-"
+                usage = r.get("usage", [])
+                if usage:
+                    usage_text = f"使用中 ({len(usage)}个任务)"
+                    usage_color = "#ebcb8b"
+                else:
+                    usage_text = "空闲"
+                    usage_color = "#a3be8c"
+
+                html_parts.append('<tr style="border-bottom:1px solid #2e3440;">')
+                html_parts.append(f'<td style="padding:8px;">{r["proxy"]}</td>')
+                html_parts.append(f'<td style="padding:8px; color:{status_color};">{status_text}</td>')
+                html_parts.append(f'<td style="padding:8px;">{latency}</td>')
+                html_parts.append(f'<td style="padding:8px; color:{usage_color};">{usage_text}</td>')
+                html_parts.append(f'<td style="padding:8px; font-size:0.9em;">{ip_info}</td>')
+                html_parts.append('</tr>')
+
+            html_parts.append('</table>')
+            html_parts.append('</div>')
+            return "".join(html_parts)
+        except Exception as e:
+            return f'<div class="btb-card-note">获取代理状态失败: {e}</div>'
+
     with gr.Column(elem_classes="btb-page-section"):
         with gr.Column(elem_classes="btb-card btb-card-sky btb-layout-card"):
             with gr.Row(elem_classes="!items-stretch !gap-3"):
@@ -174,6 +234,22 @@ def go_start_tab():
                         value=_build_session_ticket_preview,
                         visible=True,
                     )
+            # 代理状态显示区域
+            proxy_status_ui = gr.HTML(
+                value=get_proxy_status,
+                label="代理状态",
+            )
+            refresh_proxy_btn = gr.Button(
+                "刷新代理状态",
+                elem_classes="btb-soft-button",
+                scale=0,
+                min_width=150,
+            )
+            refresh_proxy_btn.click(
+                fn=get_proxy_status,
+                inputs=None,
+                outputs=proxy_status_ui,
+            )
             with gr.Column(elem_classes="btb-card btb-card-sky btb-layout-card"):
                 gr.HTML(
                     """
@@ -451,6 +527,23 @@ def go_start_tab():
             "log_retention_days": log_retention_days,
         }
 
+        # 检查代理数量限制
+        available_proxies = len(https_proxy_list)  # 包含 "none" 直连
+        running_tasks = [t for t in GlobalStatusInstance.get_task_logs() if t.status == "运行中"]
+        running_task_count = len(running_tasks)
+        max_concurrent_tasks = available_proxies  # 每个终端需要一个代理
+
+        if running_task_count >= max_concurrent_tasks:
+            gr.Warning(f"代理数量不足！当前有 {running_task_count} 个运行中的任务，但只有 {available_proxies} 个可用代理。请先停止部分任务后再启动新任务。")
+            return gr.update(visible=True)
+
+        # 检查要启动的任务数量是否超过限制
+        tasks_to_start = len(files)
+        if running_task_count + tasks_to_start > max_concurrent_tasks:
+            allowed_tasks = max_concurrent_tasks - running_task_count
+            gr.Warning(f"代理数量不足！只能再启动 {allowed_tasks} 个任务（当前运行 {running_task_count} 个，代理总数 {available_proxies} 个）。")
+            files = files[:allowed_tasks]
+
         if proxy_assignment_strategy == "queue":
             worker_count = len(https_proxy_list)
             if queue_concurrency_limit > 0:
@@ -612,8 +705,40 @@ def go_settings_tab(header_ui):
     def get_latest_proxy():
         return _format_proxy_text(ConfigDB.get("https_proxy") or "")
 
-    def input_https_proxy(_https_proxy):
-        normalized_proxy = _serialize_proxy_text(_https_proxy)
+    def input_https_proxy(_https_proxy, _proxy_user, _proxy_pass, _proxy_port):
+        # 保存用户名、密码、端口
+        ConfigDB.insert("proxy_user", _proxy_user or "")
+        ConfigDB.insert("proxy_pass", _proxy_pass or "")
+        ConfigDB.insert("proxy_port", _proxy_port or "")
+
+        # 处理代理地址，自动拼接认证信息
+        lines = [line.strip() for line in (_https_proxy or "").splitlines() if line.strip()]
+        processed_lines = []
+        for line in lines:
+            # 如果已经是完整格式（包含 ://），保持不变
+            if "://" in line:
+                processed_lines.append(line)
+            else:
+                # 只填写了 IP 或 IP:端口
+                parts = line.split(":")
+                ip = parts[0]
+                port = parts[1] if len(parts) > 1 else _proxy_port
+
+                if not port:
+                    gr.Warning(f"代理 {line} 缺少端口，请填写端口或在上方端口框中设置默认端口")
+                    processed_lines.append(line)
+                    continue
+
+                # 构建完整代理 URL
+                if _proxy_user and _proxy_pass:
+                    proxy_url = f"http://{_proxy_user}:{_proxy_pass}@{ip}:{port}"
+                elif _proxy_user:
+                    proxy_url = f"http://{_proxy_user}@{ip}:{port}"
+                else:
+                    proxy_url = f"http://{ip}:{port}"
+                processed_lines.append(proxy_url)
+
+        normalized_proxy = _serialize_proxy_text("\n".join(processed_lines))
         ConfigDB.insert("https_proxy", normalized_proxy)
         gr.Info("代理配置已保存。")
         return gr.update(value=_format_proxy_text(normalized_proxy))
@@ -935,10 +1060,30 @@ def go_settings_tab(header_ui):
             with gr.Tab("代理"):
                 with gr.Column(elem_classes="btb-card btb-layout-card"):
                     gr.Markdown("### 填写你的代理服务器")
+                    with gr.Row():
+                        proxy_user_ui = gr.Textbox(
+                            label="代理用户名",
+                            placeholder="如：proxyuser",
+                            value=ConfigDB.get("proxy_user") or "",
+                            scale=1,
+                        )
+                        proxy_pass_ui = gr.Textbox(
+                            label="代理密码",
+                            placeholder="如：your_password",
+                            value=ConfigDB.get("proxy_pass") or "",
+                            type="password",
+                            scale=1,
+                        )
+                        proxy_port_ui = gr.Textbox(
+                            label="代理端口",
+                            placeholder="如：1080",
+                            value=ConfigDB.get("proxy_port") or "",
+                            scale=1,
+                        )
                     https_proxy_ui = gr.Textbox(
                         label="代理服务器地址",
                         lines=4,
-                        placeholder="每行填写一个代理地址，留空表示只使用直连\n例如：\nhttp://127.0.0.1:8080\nsocks5://127.0.0.1:1080\nhttp://proxyuser:proxypass@xx.xx.xx.xx:8080",
+                        placeholder="每行填写一个IP地址，自动拼接认证信息\n例如：\n43.142.171.108\n124.222.170.124\n也支持完整格式：socks5://user:pass@IP:端口",
                         value=get_latest_proxy(),
                     )
                     with gr.Row(elem_classes="btb-inline-actions !justify-end"):
@@ -1261,7 +1406,9 @@ def go_settings_tab(header_ui):
                     )
 
     save_proxy_btn.click(
-        fn=input_https_proxy, inputs=https_proxy_ui, outputs=https_proxy_ui
+        fn=input_https_proxy,
+        inputs=[https_proxy_ui, proxy_user_ui, proxy_pass_ui, proxy_port_ui],
+        outputs=https_proxy_ui,
     )
     clear_proxy_btn.click(fn=clear_https_proxy, outputs=https_proxy_ui)
     test_proxy_btn.click(
