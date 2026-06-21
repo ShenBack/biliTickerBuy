@@ -191,6 +191,7 @@ def buy_cmd(args: Namespace):
             ntfy_username=args.ntfy_username,
             ntfy_password=args.ntfy_password,
             meow_nickname=args.meowNickname,
+            feishu_webhook=args.feishuWebhook,
             audio_path=args.audio_path,
             notify_proxy_exhausted=args.notify_proxy_exhausted,
         )

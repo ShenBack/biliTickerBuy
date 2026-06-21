@@ -161,6 +161,12 @@ def main():
         help="Ntfy password (optional).",
     )
     notify.add_argument(
+        "--feishuWebhook",
+        type=str,
+        default=os.environ.get("BTB_FEISHU_WEBHOOK", ""),
+        help="Feishu webhook URL (optional).",
+    )
+    notify.add_argument(
         "--notify_proxy_exhausted",
         action="store_true",
         default=get_env_default("NOTIFY_PROXY_EXHAUSTED", False, str_to_bool),

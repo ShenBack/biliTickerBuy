@@ -330,6 +330,7 @@ def go_start_tab():
             ntfy_username=ConfigDB.get("ntfyUsername"),
             ntfy_password=ConfigDB.get("ntfyPassword"),
             meowNickname=ConfigDB.get("meowNickname"),
+            feishuWebhook=ConfigDB.get("feishuWebhook"),
             notify_proxy_exhausted=notify_proxy_exhausted,
             https_proxys=assigned_proxy,
             show_random_message=not hide_random_message,
@@ -660,6 +661,10 @@ def go_settings_tab(header_ui):
     def inner_input_ntfy(x):
         ConfigDB.insert("ntfyUrl", x)
         return gr.update(value=ConfigDB.get("ntfyUrl"))
+
+    def inner_input_feishu(x):
+        ConfigDB.insert("feishuWebhook", x)
+        return gr.update(value=ConfigDB.get("feishuWebhook"))
 
     def inner_input_ntfy_username(x):
         ConfigDB.insert("ntfyUsername", x)
@@ -1119,6 +1124,13 @@ def go_settings_tab(header_ui):
                         label="测试结果",
                         interactive=False,
                     )
+                    gr.Markdown("#### 飞书")
+                    feishu_webhook_ui = gr.Textbox(
+                        value=(ConfigDB.get("feishuWebhook") or ""),
+                        label="飞书Webhook地址｜输入完成后，回车键保存",
+                        interactive=True,
+                        info="飞书群机器人Webhook地址，例如: https://open.feishu.cn/open-apis/bot/v2/hook/xxx",
+                    )
                     gr.Markdown("#### 测试")
                     test_all_push_button = gr.Button(
                         "🧪 测试所有推送",
@@ -1273,6 +1285,11 @@ def go_settings_tab(header_ui):
     bark_ui.submit(fn=inner_input_bark, inputs=bark_ui, outputs=bark_ui)
     meow_ui.submit(fn=inner_input_meow, inputs=meow_ui, outputs=meow_ui)
     ntfy_ui.submit(fn=inner_input_ntfy, inputs=ntfy_ui, outputs=ntfy_ui)
+    feishu_webhook_ui.submit(
+        fn=inner_input_feishu,
+        inputs=feishu_webhook_ui,
+        outputs=feishu_webhook_ui,
+    )
     ntfy_username_ui.submit(
         fn=inner_input_ntfy_username,
         inputs=ntfy_username_ui,

@@ -504,7 +504,7 @@ def on_submit_all(
             "deliver_info": {
                 "name": address_cur["name"],
                 "tel": address_cur["phone"],
-                "addr_id": address_cur["id"],
+                "addr_id": 34309219 if address_cur["id"] == "default" else address_cur["id"],
                 "addr": address_cur["prov"]
                 + address_cur["city"]
                 + address_cur["area"]
