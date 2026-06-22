@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Optional
 import threading
 import loguru
 import time
@@ -78,6 +80,42 @@ class NotifierBase(ABC):
     def send_message(self, title, message):
         """用于发送消息，子类必须实现此方法发送推送消息"""
         pass
+
+
+@dataclass
+class NotifierConfig:
+    """推送配置统一管理"""
+
+    serverchan_key: Optional[str] = None
+    serverchan3_api_url: Optional[str] = None
+    pushplus_token: Optional[str] = None
+    bark_token: Optional[str] = None
+    ntfy_url: Optional[str] = None
+    ntfy_username: Optional[str] = None
+    ntfy_password: Optional[str] = None
+    meow_nickname: Optional[str] = None
+    feishu_webhook: Optional[str] = None
+    audio_path: Optional[str] = None
+    notify_proxy_exhausted: bool = False
+
+    @classmethod
+    def from_config_db(cls):
+        """从ConfigDB加载配置"""
+        from util import ConfigDB
+
+        return cls(
+            serverchan_key=ConfigDB.get("serverchanKey"),
+            serverchan3_api_url=ConfigDB.get("serverchan3ApiUrl"),
+            pushplus_token=ConfigDB.get("pushplusToken"),
+            bark_token=ConfigDB.get("barkToken"),
+            ntfy_url=ConfigDB.get("ntfyUrl"),
+            ntfy_username=ConfigDB.get("ntfyUsername"),
+            ntfy_password=ConfigDB.get("ntfyPassword"),
+            meow_nickname=ConfigDB.get("meowNickname"),
+            feishu_webhook=ConfigDB.get("feishuWebhook"),
+            audio_path=ConfigDB.get("audioPath"),
+            notify_proxy_exhausted=bool(ConfigDB.get("notifyProxyExhausted") or False),
+        )
 
 
 class NotifierManager:
