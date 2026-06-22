@@ -3,6 +3,7 @@ config
 venv
 .venv
 .idea
+mergevenv
 dist
 log/*
 log/log.txt
