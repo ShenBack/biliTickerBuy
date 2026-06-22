@@ -12,6 +12,7 @@ from app_cmd.config.ConfigBasic import (
     str_to_bool,
 )
 from app_cmd.config.NotifierConfig import NotifierConfig
+from util.Constant import DEFAULT_RATE_LIMIT_DELAY_MS
 
 
 @dataclass(slots=True)
@@ -110,6 +111,36 @@ class BuyConfig(BasicConfig):
         cast=int,
     )
     """Number of create-order requests sent in one batch."""
+
+    rate_limit_delay_ms: int = config_field(
+        DEFAULT_RATE_LIMIT_DELAY_MS,
+        env="BTB_RATE_LIMIT_DELAY_MS",
+        runtime="rate_limit_delay_ms",
+        db="rateLimitDelayMs",
+        cli="--rate-limit-delay-ms",
+        cast=int,
+    )
+    """Delay after receiving HTTP 429, in milliseconds."""
+
+    refresh_interval_min_count: int = config_field(
+        10,
+        env="BTB_REFRESH_INTERVAL_MIN_COUNT",
+        runtime="refresh_interval_min_count",
+        db="refreshIntervalMinCount",
+        cli="--refresh-interval-min-count",
+        cast=int,
+    )
+    """循环内主动复检项目详情的最小 create 次数。"""
+
+    refresh_interval_max_count: int = config_field(
+        30,
+        env="BTB_REFRESH_INTERVAL_MAX_COUNT",
+        runtime="refresh_interval_max_count",
+        db="refreshIntervalMaxCount",
+        cli="--refresh-interval-max-count",
+        cast=int,
+    )
+    """循环内主动复检项目详情的最大 create 次数。"""
 
     proxy_max_consecutive_failures: int = config_field(
         10,
