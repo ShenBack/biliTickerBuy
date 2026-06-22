@@ -118,6 +118,7 @@ def ticker_cmd(args: TickerCliArgs):
     from tab.config import go_settings_tab
     from tab.log import log_tab, refresh_log_panel, refresh_task_panel
     from tab.settings import login_tab, setting_tab
+    from tab.bws import bws_tab
     from util.log.LogWeb import attach_log_routes
     from util import ConfigDB, GLOBAL_COOKIE_PATH, LOG_DIR, TEMP_PATH
     from util.log.LogConfig import loguru_config
@@ -288,6 +289,8 @@ def ticker_cmd(args: TickerCliArgs):
                     log_task_refresh_token, log_task_panel = log_tab()
                 with gr.Tab("分享选票", id="share", elem_id="btb-tab-share"):
                     _share_tab(args.server_name)
+                with gr.Tab("BWS预约", id="bws", elem_id="btb-tab-bws"):
+                    bws_tab()
         demo.load(
             fn=refresh_all_task_panels,
             outputs=[
