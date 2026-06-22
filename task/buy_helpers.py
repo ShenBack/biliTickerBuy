@@ -4,7 +4,7 @@ import datetime
 import math
 import time
 
-from cptoken import CTokenRuntimeState, sim_ctoken_state
+from cptoken import CTokenRuntimeState, sim_ctoken_state, PTokenGenerator
 
 from util import time_service
 from app_cmd.config.NotifierConfig import NotifierConfig
@@ -302,6 +302,7 @@ def prepare_create_request(
     is_hot_project: bool,
     request_result: dict | None,
     ticket_state: CTokenRuntimeState,
+    local_ptoken: str | None = None,
 ) -> tuple[str, dict]:
     payload = dict(tickets_info)
     payload["again"] = 1
@@ -318,15 +319,19 @@ def prepare_create_request(
         f"{BASE_URL}/api/ticket/order/createV2?project_id={tickets_info['project_id']}"
     )
 
-    # if not is_hot_project:
-    #     return url, payload
     create_state = sim_ctoken_state(
         before_state=ticket_state,
         now_ms=now_ms,
     )
-    payload["ctoken"] = create_state.generate_create_ctoken()
-    prepare_data = request_result.get("data", {}) if request_result else {}
-    ptoken = normalize_prepare_ptoken(prepare_data.get("ptoken"))
+    ctoken = create_state.generate_create_ctoken()
+    payload["ctoken"] = ctoken
+
+    if local_ptoken is not None:
+        ptoken = local_ptoken
+    else:
+        prepare_data = request_result.get("data", {}) if request_result else {}
+        ptoken = normalize_prepare_ptoken(prepare_data.get("ptoken"))
+
     payload["ptoken"] = ptoken
     payload["orderCreateUrl"] = "https://show.bilibili.com/api/ticket/order/createV2"
     url += "&ptoken=" + ptoken

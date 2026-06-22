@@ -591,7 +591,7 @@ def go_settings_tab(header_ui):
                     use_local_token_ui = gr.Checkbox(
                         label="使用本地 token",
                         value=buy_defaults.use_local_token,
-                        info="默认关闭。开启后，非 hotproject 直接使用本地生成 token。",
+                        info="默认关闭。开启后跳过 prepare 接口，直接使用本地生成的 token。",
                     )
                     request_interval_ui = gr.Number(
                         label="默认抢票间隔（毫秒）",

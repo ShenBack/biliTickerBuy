@@ -366,6 +366,50 @@ def sim_ctoken_state(
     return snapshot
 
 
+class PTokenGenerator:
+    """本地 ptoken 生成器
+
+    ptoken 是 B站 prepare API 返回的 32 字节二进制 token（base64 编码）。
+    根据日志推导，ptoken 由 ctoken 派生而来：
+
+    字节 0-11:  固定头部 00 11 00 00 00 08 00 00 00 02 00 27
+    字节 12:    固定 0x00
+    字节 13:    ctoken[12]（票类型/场次 T）
+    字节 14-18: 固定零
+    字节 19:    ctoken[18]（V2）
+    字节 20-23: 固定零
+    字节 24-30: 固定尾部 00 04 00 08 00 01 00
+    字节 31:    调用序号（递增）
+    """
+
+    _HEADER = bytes.fromhex("001100000008000000020027")
+    _TAIL = bytes.fromhex("00040008000100")
+
+    def __init__(self, start_seq: int = 0):
+        self._seq = start_seq
+
+    def generate(self, ctoken_b64: str, seq: int | None = None) -> str:
+        c = base64.b64decode(ctoken_b64)
+        if len(c) != 32:
+            raise ValueError("ctoken 长度必须是 32 字节")
+
+        if seq is None:
+            seq = self._seq
+            self._seq += 1
+
+        buf = bytearray(32)
+        buf[0:12] = self._HEADER
+        buf[12] = 0x00
+        buf[13] = c[12]
+        buf[14:19] = b"\x00\x00\x00\x00\x00"
+        buf[19] = c[18]
+        buf[20:24] = b"\x00\x00\x00\x00"
+        buf[24:31] = self._TAIL
+        buf[31] = seq & 0xFF
+
+        return base64.b64encode(bytes(buf)).decode("utf-8")
+
+
 __all__ = [
     "CTokenRuntimeState",
     "CTokenSnapshot",
@@ -373,4 +417,5 @@ __all__ = [
     "generate_browser_window_state",
     "init_ctoken_state",
     "sim_ctoken_state",
+    "PTokenGenerator",
 ]
