@@ -4,6 +4,7 @@ venv
 .venv
 mergevenv
 .idea
+mergevenv
 dist
 log/*
 log/log.txt
