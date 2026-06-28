@@ -1,3 +1,13 @@
+"""
+文件整体功能：为 FastAPI 应用提供日志查看与实时流式推送能力。
+所属模块：util.log
+依赖文件：
+    - util（导入 LOG_DIR 常量）
+    - util.Constant（导入 _LOG_STREAM_ROUTE、_LOG_VIEW_ROUTE）
+对外能力：提供 attach_log_routes、build_log_view_url、build_log_stream_url 函数，
+          支持在 Web 页面中查看日志并通过 SSE 实时推送新增内容。
+"""
+
 from __future__ import annotations
 
 from html import escape
@@ -15,11 +25,33 @@ from util.Constant import _LOG_STREAM_ROUTE, _LOG_VIEW_ROUTE
 
 
 def build_log_view_url(path: str) -> str:
+    """
+    根据日志文件路径构建日志查看 URL。
+
+    参数：
+        path (str)：日志文件的完整路径。
+    返回值：str，可访问的日志查看路由 URL，name 参数为 URL 编码后的文件名。
+    内部逻辑：提取 basename 后进行 URL 编码并拼接查询参数。
+    调用位置：任务日志列表、日志管理界面等需要生成日志查看链接的场景。
+    """
     log_name = os.path.basename(path)
     return f"{_LOG_VIEW_ROUTE}?name={quote(log_name, safe='')}"
 
 
 def _resolve_log_path(raw_path: str | None = None, log_name: str | None = None) -> Path:
+    """
+    解析并校验日志文件路径，防止目录穿越。
+
+    参数：
+        raw_path (str | None)：原始日志路径。
+        log_name (str | None)：日志文件名。
+    返回值：Path，校验通过且存在的日志文件 Path 对象。
+    内部逻辑：
+        1. 若提供 log_name，则限制在 LOG_DIR 根目录下；
+         若提供 raw_path，则校验其必须位于 LOG_DIR 之下；
+        3. 文件不存在或非文件时抛出 HTTPException。
+    调用位置：view_log、stream_log 路由处理函数内部调用。
+    """
     log_root = Path(LOG_DIR).resolve()
 
     if log_name:
@@ -45,11 +77,33 @@ def _resolve_log_path(raw_path: str | None = None, log_name: str | None = None) 
 
 
 def _read_log_text(path: Path) -> str:
+    """
+    读取日志文件文本内容。
+
+    参数：
+        path (Path)：日志文件路径。
+    返回值：str，文件内容字符串，读取错误时用 replacement 字符替换。
+    内部逻辑：以 utf-8 编码打开文件，errors="replace" 保证损坏字节不会中断读取。
+    调用位置：view_log 初始加载、stream_log 重置/追加时调用。
+    """
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         return handle.read()
 
 
 def attach_log_routes(app) -> None:
+    """
+    向 FastAPI 应用挂载日志查看与流式推送路由。
+
+    参数：
+        app (FastAPI)：目标 FastAPI 应用实例。
+    返回值：无。
+    内部逻辑：
+        1. 检查 app.state.btb_log_routes_ready 防止重复注册；
+        2. 注册 /__btb/logs/view GET 路由，返回日志查看 HTML 页面；
+        3. 注册 /__btb/logs/stream GET 路由，通过 SSE 推送日志增量；
+        4. 标记 btb_log_routes_ready 为 True。
+    调用位置：Web 服务启动时调用，如 main.py 或 interface 模块。
+    """
     if getattr(app.state, "btb_log_routes_ready", False):
         return
 
@@ -59,6 +113,20 @@ def attach_log_routes(app) -> None:
         path: str | None = Query(default=None),
         name: str | None = Query(default=None),
     ) -> HTMLResponse:
+        """
+        日志查看页面路由处理函数。
+
+        参数：
+            request (Request)：FastAPI 请求对象。
+            path (str | None)：原始日志路径查询参数。
+            name (str | None)：日志文件名查询参数。
+        返回值：HTMLResponse，包含完整 HTML 页面的响应。
+        内部逻辑：
+            1. 调用 _resolve_log_path 解析并校验日志文件；
+            2. 读取初始日志文本并做 HTML 转义；
+            3. 构造包含 SSE 订阅逻辑的 HTML 页面返回。
+        调用位置：用户通过浏览器访问日志查看 URL 时由 FastAPI 调用。
+        """
         log_path = _resolve_log_path(raw_path=path, log_name=name)
         initial_text = escape(_read_log_text(log_path))
         title = escape(log_path.name)
@@ -84,7 +152,7 @@ def attach_log_routes(app) -> None:
       margin: 0;
       background: var(--bg);
       color: var(--text);
-      font: 14px/1.5 "Noto Sans SC", system-ui, sans-serif;
+      font: 14px/1.5 "Google Sans", "Roboto", "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
     }}
     .shell {{
       display: grid;
@@ -166,6 +234,21 @@ def attach_log_routes(app) -> None:
         path: str | None = Query(default=None),
         name: str | None = Query(default=None),
     ) -> StreamingResponse:
+        """
+        日志实时流式推送路由处理函数（SSE）。
+
+        参数：
+            path (str | None)：原始日志路径查询参数。
+            name (str | None)：日志文件名查询参数。
+        返回值：StreamingResponse，Content-Type 为 text/event-stream。
+        内部逻辑：
+            1. 解析并校验日志文件路径；
+            2. 从当前文件末尾开始读取；
+            3. 循环检测文件大小变化，输出新增内容或重置事件；
+            4. 每 10 秒输出一次 ping 注释保持连接；
+            5. 文件被删除时输出提示并结束。
+        调用位置：浏览器通过 EventSource 访问流式日志 URL 时由 FastAPI 调用。
+        """
         log_path = _resolve_log_path(raw_path=path, log_name=name)
 
         def generate():
@@ -210,10 +293,29 @@ def attach_log_routes(app) -> None:
 
 
 def build_log_stream_url(path: str) -> str:
+    """
+    根据日志文件路径构建日志流式推送 URL。
+
+    参数：
+        path (str)：日志文件的完整路径。
+    返回值：str，SSE 流式日志 URL。
+    内部逻辑：提取 basename 并 URL 编码后拼接查询参数。
+    调用位置：需要在前端或日志列表中生成 SSE 链接的场景。
+    """
     log_name = os.path.basename(path)
     return f"{_LOG_STREAM_ROUTE}?name={quote(log_name, safe='')}"
 
 
 def _sse(event: str, data: str) -> str:
+    """
+    构造 SSE（Server-Sent Events）事件帧。
+
+    参数：
+        event (str)：事件类型，如 "append" 或 "reset"。
+        data (str)：事件数据内容。
+    返回值：str，符合 SSE 协议的字符串帧。
+    内部逻辑：将换行符统一为 \n，并在每行前添加 "data: " 前缀，最后追加空行。
+    调用位置：stream_log 的 generate 内部调用。
+    """
     safe_data = data.replace("\r\n", "\n").replace("\r", "\n")
     return f"event: {event}\ndata: {safe_data.replace(chr(10), chr(10) + 'data: ')}\n\n"

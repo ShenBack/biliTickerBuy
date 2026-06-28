@@ -1,3 +1,15 @@
+"""
+文件整体功能：生成浏览器指纹状态，为 B 站会员购请求提供逼真的浏览器请求头与设备信息。
+所属模块：util.request
+依赖文件：无项目内业务依赖，仅使用 Python 标准库与 typing。
+对外能力：
+    1. 提供一组 TypedDict 描述浏览器窗口、显示、navigator、locale、location、
+       WebGL、Canvas、Storage 等指纹字段；
+    2. 提供 random_hex、build_chrome_user_agent、extract_app_version_from_ua 等工具函数；
+    3. 提供 generate_browser_fingerprint_state 生成完整指纹；
+    4. 提供 build_headers_from_browser_state 根据指纹构造 HTTP 请求头；
+    5. 提供 finalize_device_id 对原始 deviceId 做与旧版对齐的变换。
+"""
 from __future__ import annotations
 
 import random
@@ -12,6 +24,14 @@ from typing import Any, Mapping
 
 
 class BrowserWindowState(TypedDict):
+    """
+    浏览器窗口与屏幕状态。
+
+    类设计作用：对应前端 window 与 screen 对象的关键尺寸与位置字段。
+    存储属性：scrollX、scrollY、innerWidth、innerHeight、outerWidth、outerHeight、
+              screenX、screenY、screenWidth、screenHeight、screenAvailWidth、screenAvailHeight。
+    承担业务：为浏览器指纹提供窗口/屏幕维度信息。
+    """
     scrollX: int
     scrollY: int
     innerWidth: int
@@ -27,12 +47,28 @@ class BrowserWindowState(TypedDict):
 
 
 class BrowserDisplayState(TypedDict):
+    """
+    浏览器显示状态。
+
+    类设计作用：对应 window.devicePixelRatio 与 screen 的颜色深度字段。
+    存储属性：devicePixelRatio、colorDepth、pixelDepth。
+    承担业务：为浏览器指纹提供显示参数。
+    """
     devicePixelRatio: float
     colorDepth: int
     pixelDepth: int
 
 
 class BrowserNavigatorState(TypedDict):
+    """
+    浏览器 navigator 状态。
+
+    类设计作用：对应 navigator 对象的常见字段，如 UA、平台、语言、硬件并发数等。
+    存储属性：userAgent、appCodeName、appName、appVersion、platform、product、
+              productSub、vendor、vendorSub、language、languages、cookieEnabled、
+              hardwareConcurrency、deviceMemory、maxTouchPoints、webdriver。
+    承担业务：为浏览器指纹提供 navigator 维度的信息，用于构造请求头。
+    """
     userAgent: str
     appCodeName: str
     appName: str
@@ -52,12 +88,27 @@ class BrowserNavigatorState(TypedDict):
 
 
 class BrowserLocaleState(TypedDict):
+    """
+    浏览器本地与时区状态。
+
+    类设计作用：对应 Intl.DateTimeFormat 与 Date.getTimezoneOffset 的结果。
+    存储属性：locale、timezone、timezoneOffset。
+    承担业务：为浏览器指纹提供地域与时区信息。
+    """
     locale: str
     timezone: str
     timezoneOffset: int
 
 
 class BrowserLocationState(TypedDict):
+    """
+    浏览器 location 与 history 状态。
+
+    类设计作用：对应 window.location 与 history.length。
+    存储属性：href、origin、protocol、host、hostname、port、pathname、search、
+              hash、hrefLength、historyLength。
+    承担业务：为浏览器指纹提供页面地址与历史长度信息。
+    """
     href: str
     origin: str
     protocol: str
@@ -72,6 +123,13 @@ class BrowserLocationState(TypedDict):
 
 
 class BrowserWebGLState(TypedDict):
+    """
+    浏览器 WebGL 状态。
+
+    类设计作用：对应 WebGL 上下文参数与 debug renderer info 扩展。
+    存储属性：vendor、renderer、unmaskedVendor、unmaskedRenderer。
+    承担业务：为浏览器指纹提供 GPU 与渲染器信息。
+    """
     vendor: str
     renderer: str
     unmaskedVendor: str
@@ -79,18 +137,39 @@ class BrowserWebGLState(TypedDict):
 
 
 class BrowserCanvasState(TypedDict):
+    """
+    浏览器 Canvas 指纹状态。
+
+    类设计作用：对应 Canvas  winding 规则与 x64hash128 指纹。
+    存储属性：winding、x64hash128、dataUrlHash（可选）。
+    承担业务：为浏览器指纹提供 Canvas 渲染特征。
+    """
     winding: Literal["yes", "no"]
     x64hash128: str
     dataUrlHash: NotRequired[str]
 
 
 class BrowserStorageState(TypedDict):
+    """
+    浏览器存储状态。
+
+    类设计作用：对应 localStorage、sessionStorage 与 cookies。
+    存储属性：localStorage、sessionStorage、cookies。
+    承担业务：为浏览器指纹提供存储层快照，构建请求头时可从中读取 cookie。
+    """
     localStorage: dict[str, str]
     sessionStorage: dict[str, str]
     cookies: dict[str, str]
 
 
 class BrowserFingerprintState(TypedDict):
+    """
+    完整浏览器指纹状态。
+
+    类设计作用：聚合上述所有子状态，作为 generate_browser_fingerprint_state 的返回类型。
+    存储属性：window、display、navigator、locale、location、webgl、canvas、storage。
+    承担业务：为 BiliRequest 提供一整套自洽的浏览器指纹数据。
+    """
     window: BrowserWindowState
     display: BrowserDisplayState
     navigator: BrowserNavigatorState
@@ -108,8 +187,13 @@ class BrowserFingerprintState(TypedDict):
 
 def random_hex(length: int) -> str:
     """
-    生成 length 位 hex 字符串。
-    例如 x64hash128 通常是 32 位 hex。
+    生成指定长度的 hex 字符串。
+
+    参数：
+        length (int)：目标长度，例如 x64hash128 通常为 32。
+    返回值：str，指定长度的十六进制字符字符串。
+    内部逻辑：使用 secrets.token_hex 生成足够长度后截取。
+    调用位置：generate_browser_canvas_state 等需要随机 hex 指纹的场景。
     """
     return secrets.token_hex((length + 1) // 2)[:length]
 
@@ -120,7 +204,17 @@ def build_chrome_user_agent(
     chrome_major: int | None = None,
 ) -> str:
     """
-    构造一个常见桌面 Chrome UA。
+    构造一个常见桌面 Chrome User-Agent。
+
+    参数：
+        os_name (str)：操作系统，可选 windows/macos/linux，默认 windows。
+        chrome_major (int | None)：Chrome 主版本号，为 None 时随机选择。
+    返回值：str，完整的 Chrome UA 字符串。
+    内部逻辑：
+        1. 随机选择或采用传入的 Chrome 主版本号；
+        2. 根据 os_name 选择对应的系统平台字符串；
+        3. 拼接成标准 Mozilla/5.0 ... Chrome/... Safari/537.36 格式。
+    调用位置：generate_browser_navigator_state 中调用。
     """
     if chrome_major is None:
         chrome_major = random.choice([124, 125, 126, 127, 128, 129, 130, 131])
@@ -151,7 +245,13 @@ def build_chrome_user_agent(
 
 def extract_app_version_from_ua(user_agent: str) -> str:
     """
-    navigator.appVersion 常见表现：UA 去掉开头的 Mozilla/
+    从 User-Agent 中提取 navigator.appVersion 常见值。
+
+    参数：
+        user_agent (str)：完整 UA 字符串。
+    返回值：str，去掉开头 "Mozilla/" 后的字符串。
+    内部逻辑：检测并移除前缀 "Mozilla/"。
+    调用位置：generate_browser_navigator_state 中构造 appVersion 字段。
     """
     prefix = "Mozilla/"
     if user_agent.startswith(prefix):
@@ -173,21 +273,21 @@ def generate_browser_window_state(
     os_name: Literal["windows", "macos", "linux"] = "windows",
 ) -> BrowserWindowState:
     """
-    生成一组自洽的浏览器窗口尺寸参数。
+    生成一组自洽的浏览器窗口与屏幕尺寸参数。
 
-    对应 JS 字段：
-    - window.scrollX
-    - window.scrollY
-    - window.innerWidth
-    - window.innerHeight
-    - window.outerWidth
-    - window.outerHeight
-    - window.screenX
-    - window.screenY
-    - window.screen.width
-    - window.screen.height
-    - window.screen.availWidth
-    - window.screen.availHeight
+    参数：
+        screen_width (int | None)：屏幕宽度，为 None 时随机选择。
+        screen_height (int | None)：屏幕高度，为 None 时随机选择。
+        maximized (bool | None)：是否最大化，为 None 时按概率随机。
+        scroll (bool)：是否生成滚动偏移，默认 False。
+        os_name (str)：操作系统，影响任务栏保留高度。
+    返回值：BrowserWindowState，包含窗口与屏幕各字段的字典。
+    内部逻辑：
+        1. 若未指定则随机选择常见分辨率；
+        2. 根据 os_name 扣除任务栏/菜单栏高度得到可用区域；
+        3. 随机决定最大化或窗口化位置；
+        4. 计算 inner/outer 尺寸与滚动偏移。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     common_screens = [
@@ -279,10 +379,15 @@ def generate_browser_display_state(
     device_pixel_ratio: float | None = None,
 ) -> BrowserDisplayState:
     """
-    对应：
-    - window.devicePixelRatio
-    - screen.colorDepth
-    - screen.pixelDepth
+    生成浏览器显示相关参数。
+
+    参数：
+        screen_width (int)：屏幕宽度。
+        screen_height (int)：屏幕高度。
+        device_pixel_ratio (float | None)：设备像素比，为 None 时按分辨率随机。
+    返回值：BrowserDisplayState，包含 devicePixelRatio、colorDepth、pixelDepth。
+    内部逻辑：根据屏幕分辨率选择合理的 devicePixelRatio，colorDepth 常见为 24。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     if device_pixel_ratio is None:
@@ -312,7 +417,20 @@ def generate_browser_navigator_state(
     user_agent: str | None = None,
 ) -> BrowserNavigatorState:
     """
-    对应常见 navigator 字段。
+    生成浏览器 navigator 状态。
+
+    参数：
+        os_name (str)：操作系统，影响 platform 与默认 UA。
+        locale (str)： locale，影响 languages。
+        user_agent (str | None)：自定义 UA，为 None 时随机生成。
+    返回值：BrowserNavigatorState，包含 navigator 各字段。
+    内部逻辑：
+        1. 生成或采用传入的 UA；
+        2. 根据 os_name 设置 platform；
+        3. 根据 locale 生成 languages 列表；
+        4. 随机 hardwareConcurrency 与 deviceMemory；
+        5. 固定其他 navigator 字段。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     if user_agent is None:
@@ -377,13 +495,17 @@ def generate_browser_locale_state(
     timezone: str | None = None,
 ) -> BrowserLocaleState:
     """
-    对应：
-    - Intl.DateTimeFormat().resolvedOptions().locale
-    - Intl.DateTimeFormat().resolvedOptions().timeZone
-    - new Date().getTimezoneOffset()
+    生成浏览器 locale 与时区状态。
 
-    注意：
-    中国是 -480，日本是 -540。
+    参数：
+        locale (str)：语言区域代码，默认 "zh-CN"。
+        timezone (str | None)：时区名称，为 None 时根据 locale 选择默认。
+    返回值：BrowserLocaleState，包含 locale、timezone、timezoneOffset。
+    内部逻辑：
+        1. 根据 locale 获取默认时区与偏移；
+        2. 若未指定 timezone 则使用默认值；
+        3. 根据 timezone 名称查表得到 offset。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     timezone_map = {
@@ -429,17 +551,18 @@ def generate_browser_location_state(
     history_length: int | None = None,
 ) -> BrowserLocationState:
     """
-    对应：
-    - window.location.href
-    - window.location.origin
-    - window.location.protocol
-    - window.location.host
-    - window.location.hostname
-    - window.location.port
-    - window.location.pathname
-    - window.location.search
-    - window.location.hash
-    - history.length
+    生成浏览器 location 与 history 状态。
+
+    参数：
+        href (str | None)：页面地址，为 None 时随机选择 B 站会员购示例地址。
+        history_length (int | None)：历史长度，为 None 时随机。
+    返回值：BrowserLocationState，包含 location 各字段与 historyLength。
+    内部逻辑：
+        1. 若未提供 href 则随机选取示例地址；
+        2. 使用 urllib.parse.urlparse 解析 href；
+        3. 构造 origin、protocol、host、hostname、port、pathname、search、hash；
+        4. 计算 hrefLength 与 historyLength。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     if href is None:
@@ -495,13 +618,17 @@ def generate_browser_webgl_state(
     | None = None,
 ) -> BrowserWebGLState:
     """
-    生成 WebGL 相关字段。
+    生成浏览器 WebGL 状态。
 
-    对应常见：
-    - gl.getParameter(gl.VENDOR)
-    - gl.getParameter(gl.RENDERER)
-    - WEBGL_debug_renderer_info.UNMASKED_VENDOR_WEBGL
-    - WEBGL_debug_renderer_info.UNMASKED_RENDERER_WEBGL
+    参数：
+        os_name (str)：操作系统，影响默认 GPU 类型。
+        gpu_profile (str | None)：GPU 厂商配置，为 None 时按 os_name 随机。
+    返回值：BrowserWebGLState，包含 vendor、renderer、unmaskedVendor、unmaskedRenderer。
+    内部逻辑：
+        1. 根据 os_name 随机或采用传入的 gpu_profile；
+        2. 按厂商选择对应的 unmaskedVendor 与 unmaskedRenderer；
+        3. vendor 与 renderer 固定为常见 WebKit 值。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     if gpu_profile is None:
@@ -570,10 +697,14 @@ def generate_browser_canvas_state(
     data_url_hash: str | None = None,
 ) -> BrowserCanvasState:
     """
-    Canvas 指纹字段。
+    生成浏览器 Canvas 指纹状态。
 
-    如果你已经从真实浏览器拿到了 x64hash128，建议直接传入固定值。
-    如果没传，这里只生成一个格式正确的 32 位 hex。
+    参数：
+        x64hash128 (str | None)：固定 Canvas 指纹，为 None 时随机生成 32 位 hex。
+        data_url_hash (str | None)：可选的 data URL 哈希。
+    返回值：BrowserCanvasState，包含 winding、x64hash128、dataUrlHash（可选）。
+    内部逻辑：若未提供 x64hash128 则调用 random_hex(32) 生成。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     if x64hash128 is None:
@@ -602,9 +733,15 @@ def generate_browser_storage_state(
     cookies: dict[str, str] | None = None,
 ) -> BrowserStorageState:
     """
-    localStorage / sessionStorage / cookies。
+    生成浏览器 storage 状态。
 
-    这里默认不给具体业务 cookie，避免和真实账号状态混在一起。
+    参数：
+        local_storage (dict | None)：localStorage 键值，默认空。
+        session_storage (dict | None)：sessionStorage 键值，默认空。
+        cookies (dict | None)：cookies 键值，默认空。
+    返回值：BrowserStorageState，包含 localStorage、sessionStorage、cookies。
+    内部逻辑：将传入字典复制为新 dict，避免后续修改影响默认值。
+    调用位置：generate_browser_fingerprint_state 中调用。
     """
 
     return {
@@ -642,10 +779,26 @@ def generate_browser_fingerprint_state(
     """
     生成完整浏览器指纹状态。
 
-    注意：
-    - 同一套状态应该缓存复用；
-    - 不建议每次请求都重新生成；
-    - canvasHash / webgl / UA / platform / locale 最好保持自洽。
+    参数：
+        os_name (str)：操作系统，默认 windows。
+        locale (str)：语言区域，默认 zh-CN。
+        timezone (str | None)：时区名称。
+        screen_width (int | None)：屏幕宽度。
+        screen_height (int | None)：屏幕高度。
+        maximized (bool | None)：是否最大化窗口。
+        scroll (bool)：是否生成滚动偏移。
+        href (str | None)：页面地址。
+        history_length (int | None)：历史长度。
+        user_agent (str | None)：自定义 UA。
+        device_pixel_ratio (float | None)：设备像素比。
+        gpu_profile (str | None)：GPU 厂商配置。
+        canvas_hash (str | None)：固定 Canvas 指纹。
+        local_storage (dict | None)：localStorage 键值。
+        session_storage (dict | None)：sessionStorage 键值。
+        cookies (dict | None)：cookies 键值。
+    返回值：BrowserFingerprintState，完整指纹状态字典。
+    内部逻辑：依次调用各子状态生成函数，并确保 window/display 等字段相互自洽。
+    调用位置：BiliRequest 初始化或需要构造请求头时调用。
     """
 
     window = generate_browser_window_state(
@@ -705,6 +858,18 @@ def generate_browser_fingerprint_state(
 
 
 def finalize_device_id(raw_device_id: str) -> str:
+    """
+    对原始 deviceId 做与旧版算法对齐的变换。
+
+    参数：
+        raw_device_id (str)：32 位十六进制字符串。
+    返回值：str，变换后的 32 位十六进制字符串。
+    内部逻辑：
+        1. 校验输入为 32 位 hex；
+        2. 通过 calculate_position_or_value 计算替换位置与替换值；
+        3. 替换对应位置的字符。
+    调用位置：BiliRequest 初始化 deviceId 时调用。
+    """
     if not isinstance(raw_device_id, str):
         raise TypeError("raw_device_id must be a string")
 
@@ -721,7 +886,14 @@ def finalize_device_id(raw_device_id: str) -> str:
         source_index: int,
     ) -> int:
         """
-        对应 JS 里的 i(e, t)
+        计算 deviceId 变换中的替换位置或替换值。
+
+        参数：
+            digits (list[int])：32 位 hex 对应的整数列表。
+            source_index (int)：源索引，通常为最后两位。
+        返回值：int，计算得到的位置或值。
+        内部逻辑：按旧版 JS 算法 i(e, t) 的等价实现，基于半长与步长计算目标位置。
+        调用位置：finalize_device_id 内部计算 replace_index 与 replacement_value。
         """
 
         total_length = len(digits)
@@ -763,6 +935,15 @@ def finalize_device_id(raw_device_id: str) -> str:
 
 
 def _cookie_dict_to_header(cookies: Mapping[str, str] | None) -> str:
+    """
+    将 cookies 字典转换为 Cookie 请求头字符串。
+
+    参数：
+        cookies (Mapping[str, str] | None)：Cookie 键值映射。
+    返回值：str，形如 "a=1; b=2" 的 Cookie 字符串，无 Cookie 返回空串。
+    内部逻辑：使用 "; " 连接键值对。
+    调用位置：build_headers_from_browser_state 中构造 Cookie 头。
+    """
     if not cookies:
         return ""
     return "; ".join(f"{k}={v}" for k, v in cookies.items())
@@ -770,8 +951,13 @@ def _cookie_dict_to_header(cookies: Mapping[str, str] | None) -> str:
 
 def _build_sec_ch_ua(user_agent: str) -> str:
     """
-    根据 UA 粗略生成 sec-ch-ua。
-    这里只做常见 Chrome / Edge 桌面端格式。
+    根据 User-Agent 粗略生成 sec-ch-ua 头。
+
+    参数：
+        user_agent (str)：完整 UA 字符串。
+    返回值：str，sec-ch-ua 头值。
+    内部逻辑：识别 Edge 或 Chrome，返回对应的品牌版本字符串；无法识别则返回通用 Chromium 值。
+    调用位置：build_headers_from_browser_state 中调用。
     """
     if "Edg/" in user_agent:
         return '"Microsoft Edge";v="126", "Chromium";v="126", "Not/A)Brand";v="8"'
@@ -789,6 +975,15 @@ def _build_sec_ch_ua(user_agent: str) -> str:
 
 
 def _build_sec_ch_ua_platform(platform: str) -> str:
+    """
+    根据 navigator.platform 生成 sec-ch-ua-platform 头。
+
+    参数：
+        platform (str)：navigator.platform 值，如 Win32、MacIntel。
+    返回值：str，对应平台字符串。
+    内部逻辑：匹配 Win32/MacIntel/Linux 返回对应引号字符串，默认 Windows。
+    调用位置：build_headers_from_browser_state 中调用。
+    """
     if platform == "Win32":
         return '"Windows"'
     if platform == "MacIntel":
@@ -806,18 +1001,22 @@ def build_headers_from_browser_state(
     content_type: str = "application/x-www-form-urlencoded",
 ) -> dict[str, str]:
     """
-    根据 BrowserFingerprintState 构造请求 headers。
+    根据浏览器指纹状态构造 HTTP 请求头。
 
-    支持你之前这种结构：
-
-    state = {
-        "navigator": {...},
-        "locale": {...},
-        "location": {...},
-        "storage": {
-            "cookies": {...}
-        }
-    }
+    参数：
+        state (dict | None)：BrowserFingerprintState 字典，为 None 时使用默认值。
+        base_headers (dict | None)：用户传入的基础头，优先级更高。
+        referer (str | None)：Referer 值，为 None 时从 location.origin 获取。
+        content_type (str)：Content-Type，默认 application/x-www-form-urlencoded。
+    返回值：dict[str, str]，构造好的请求头字典。
+    内部逻辑：
+        1. 从 state 提取 navigator、location、storage；
+        2. 根据 languages 生成 accept-language；
+        3. 根据 UA 生成 sec-ch-ua；
+        4. 根据 platform 生成 sec-ch-ua-platform；
+        5. 设置常见 fetch 与 Client Hints 字段；
+        6. 合并 base_headers（base_headers 优先级最高）。
+    调用位置：BiliRequest 初始化时构造 self.headers。
     """
 
     headers = dict(base_headers or {})

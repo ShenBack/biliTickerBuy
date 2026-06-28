@@ -1,3 +1,25 @@
+"""
+tab/bws.py — BWS（Bilibili World/Show）活动预约标签页。
+
+文件整体功能：
+  提供 Gradio UI 的“BWS 活动预约”标签页，支持以下能力：
+  1. 按日期查询可预约场次。
+  2. 若账号未绑定门票，则引导用户提交票号与实名信息完成绑定。
+  3. 选择目标场次后发起 BWS 预约请求。
+  4. 集中展示请求日志，便于排查预约过程中的接口返回与异常。
+
+所属模块：
+  UI 层 (tab)
+
+依赖文件：
+  - task.bws (get_reserve_info / bind_ticket / reserve_bws / BwsRequestLog / 状态码常量)
+  - util (main_request 全局请求对象)
+  - gradio / loguru (UI 与日志)
+
+对外能力：
+  - bws_tab() → 构建并返回完整的 BWS 预约 Gradio Tab 组件与事件绑定。
+"""
+
 import gradio as gr
 from loguru import logger
 import util
@@ -10,7 +32,25 @@ from task.bws import (
 
 
 def bws_tab():
-    """BWS 活动预约 Tab"""
+    """
+    构建“BWS 活动预约”标签页。
+
+    核心作用：
+      1. 使用 Gradio 组件搭建预约日期输入、请求延迟设置、
+         查询/开始预约按钮、状态提示、门票绑定表单、场次选择器与日志展示区。
+      2. 内嵌闭包函数处理查询、绑定、预约三类交互事件。
+      3. 维护 BwsRequestLog 实例收集 task.bws 中的请求日志并回显到界面。
+      4. 通过 Gradio 事件绑定将按钮/输入框与回调函数关联。
+
+    输入参数：
+      无。
+
+    返回值：
+      无（直接渲染 Gradio 组件并注册事件）。
+
+    调用场景：
+      由 ticker.py 在启动时注册为独立的 BWS 预约标签页。
+    """
     gr.Markdown("## BWS 活动预约")
 
     with gr.Row():
@@ -59,20 +99,39 @@ def bws_tab():
         )
         ticket_no_ui = gr.Textbox(label="票号（留空则自动获取）", placeholder="留空自动获取")
 
-    # 存储预约数据
+    # 存储预约数据（label -> item 的映射）
     reserve_data_state = gr.State({})
 
-    # 请求日志
+    # 请求日志展示区域
     with gr.Group():
         with gr.Row():
             gr.Markdown("### 请求日志", scale=8)
             clear_log_btn = gr.Button("清除日志", variant="secondary", scale=1, size="sm")
         log_ui = gr.Textbox(label="", interactive=False, lines=12, max_lines=30)
 
-    # 全局日志收集器
+    # 全局日志收集器，用于汇总 task.bws 中的请求记录
     _bws_log = BwsRequestLog()
 
     def on_query_reserve(dates):
+        """
+        “查询预约场次”按钮回调。
+
+        核心作用：
+          1. 清空历史日志并校验日期输入是否为空。
+          2. 调用 task.bws.get_reserve_info() 拉取指定日期的预约场次。
+          3. 若返回码为 75638，说明门票未绑定，显示绑定表单。
+          4. 若查询失败，展示错误信息并隐藏相关表单。
+          5. 查询成功时，将场次列表构建为下拉选项，默认选中第一个“可预约”状态项。
+
+        输入参数：
+          dates : str — 用户输入的预约日期，多个日期以逗号分隔，如 "20250711,20250712"。
+
+        返回值：
+          tuple — (状态文本, 绑定表单可见性, 场次选择区可见性, 下拉框更新, 场次映射字典, 日志文本)。
+
+        调用场景：
+          query_reserve_btn 按钮点击时触发。
+        """
         _bws_log.clear()
         if not dates or not dates.strip():
             gr.Warning("请输入预约日期")
@@ -128,7 +187,7 @@ def bws_tab():
                     _bws_log.get_text(),
                 )
 
-            # 构建下拉选项
+            # 构建下拉选项：label 包含活动名、状态、票号，reserve_map 用于反查原始数据
             choices = []
             reserve_map = {}
             for item in all_reserves:
@@ -141,7 +200,7 @@ def bws_tab():
                 choices.append(label)
                 reserve_map[label] = item
 
-            # 默认选第一个 state=1 的
+            # 默认选中第一个 state=1（可预约）的场次，没有则选第一个
             default_idx = 0
             for i, item in enumerate(all_reserves):
                 if item.get("state") == 1:
@@ -170,6 +229,26 @@ def bws_tab():
             )
 
     def on_bind(ticket_no, name, card_type, card_no):
+        """
+        “提交绑定”按钮回调。
+
+        核心作用：
+          1. 校验票号、姓名、证件号是否完整。
+          2. 调用 task.bws.bind_ticket() 向 B 站提交门票绑定请求。
+          3. 根据绑定结果显示成功提示或警告，并返回日志文本。
+
+        输入参数：
+          ticket_no : str — 票号后四位。
+          name      : str — 持票人姓名。
+          card_type : int — 证件类型（0 身份证 / 1 护照 / 2 港澳通行证 / 3 台湾通行证）。
+          card_no   : str — 证件号码。
+
+        返回值：
+          tuple — (绑定结果文本, 日志文本)。
+
+        调用场景：
+          bind_btn 按钮点击时触发。
+        """
         _bws_log.clear()
         if not all([ticket_no, name, card_no]):
             gr.Warning("请填写完整绑定信息")
@@ -192,12 +271,34 @@ def bws_tab():
             return f"绑定异常: {e}", _bws_log.get_text()
 
     def on_start_reserve(dates, delay, reserve_label, ticket_no, reserve_map):
+        """
+        “开始预约”按钮回调。
+
+        核心作用：
+          1. 校验日期输入。
+          2. 根据用户在下拉框中选择的 label，从 reserve_map 中反查目标 reserve_id 与票号。
+          3. 若用户未手动填写票号，则自动使用选中场次自带的 ticket_no。
+          4. 调用 task.bws.reserve_bws() 执行预约，并刷新日志展示。
+
+        输入参数：
+          dates          : str — 预约日期（逗号分隔）。
+          delay          : float — 请求延迟秒数，默认 0.9。
+          reserve_label  : str — 用户在 dropdown 中选中的场次 label。
+          ticket_no      : str — 用户手动输入的票号，留空则自动获取。
+          reserve_map    : dict — label 到场次原始字典的映射（由 on_query_reserve 生成）。
+
+        返回值：
+          tuple — (预约结果文本, 日志文本)。
+
+        调用场景：
+          start_reserve_btn 按钮点击时触发。
+        """
         _bws_log.clear()
         if not dates or not dates.strip():
             gr.Warning("请输入预约日期")
             return "请输入预约日期", _bws_log.get_text()
 
-        # 解析选中的预约项
+        # 解析选中的预约项，获取 reserve_id 与票号
         target_id = 0
         target_ticket = ticket_no or ""
         if reserve_label and reserve_label in reserve_map:
@@ -226,7 +327,7 @@ def bws_tab():
             gr.Error(f"预约异常: {e}")
             return f"预约异常: {e}", _bws_log.get_text()
 
-    # 事件绑定
+    # 事件绑定：查询、绑定、开始预约、清除日志
     query_reserve_btn.click(
         fn=on_query_reserve,
         inputs=[reserve_dates_ui],

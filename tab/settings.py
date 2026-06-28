@@ -1,3 +1,33 @@
+"""
+tab/settings.py — 账号登录与配置生成页面。
+
+文件整体功能：
+  提供 Gradio UI 的两个核心标签页：
+  1. login_tab()：账号登录与管理页，支持二维码扫码登录、Cookie 文件导入、
+                  账号切换/删除、实名购票人导入、用 Cookie 打开 B 站等功能。
+  2. setting_tab()：票务配置生成页，支持输入活动链接获取票档、选择日期、
+                    选择购票人和收货地址，最终生成 JSON 配置文件供抢票使用。
+
+  本文件还包含大量内部辅助函数，用于：
+  - 项目 ID 解析（链接/纯数字）
+  - 按日期获取场次与票档信息
+  - 票务信息 HTML 渲染
+  - 实名购票人数据持久化（people.json）
+  - Cookie 同步与账号池管理
+
+所属模块：UI 层 (tab)
+依赖文件：
+  - interface.common           (_format_sale_status)
+  - interface.project          (fetch_project_payload)
+  - util                       (ConfigDB / GLOBAL_COOKIE_PATH / TEMP_PATH / EXE_PATH)
+  - util.request.BiliRequest   (HTTP 请求封装)
+  - util.request.CookieManager (Cookie 与账号池管理)
+
+对外能力：
+  - login_tab()   → Gradio 组件元组，供 ticker.py 注册"账号登录"标签页。
+  - setting_tab() → Gradio 组件，供 ticker.py 注册"生成配置"标签页。
+"""
+
 import html
 import json
 import os
@@ -27,6 +57,10 @@ from util import set_main_request
 from util.request.BiliRequest import BiliRequest
 from util.request.CookieManager import parse_cookie_list
 
+# ---------------------------------------------------------------------------
+# 全局状态变量（由 on_submit_ticket_id 填充，供 on_submit_all 消费）
+# ---------------------------------------------------------------------------
+
 buyer_value: List[Dict[str, Any]] = []
 addr_value: List[Dict[str, Any]] = []
 ticket_value: List[Dict[str, Any]] = []
@@ -37,12 +71,37 @@ project_id = 0
 is_hot_project = False
 
 
+# ---------------------------------------------------------------------------
+# 账号与通用辅助函数
+# ---------------------------------------------------------------------------
+
 def _format_account_choice(uid: str, name: str, level: int, is_vip: bool = False) -> str:
+    """
+    格式化账号下拉框的选项文本。
+
+    输入参数：
+      uid    : str  — 用户 ID。
+      name   : str  — 用户昵称。
+      level  : int  — 用户等级。
+      is_vip : bool — 是否为大会员。
+
+    返回值：
+      str — 形如 "123456 - 用户名 (Lv5)-大会员" 的选项文本。
+    """
     vip_tag = "-大会员" if is_vip else ""
     return f"{uid} - {name} (Lv{level}){vip_tag}"
 
 
 def _find_uid_from_choice(choice: str) -> str:
+    """
+    从账号选项文本中提取 UID。
+
+    输入参数：
+      choice : str — 账号选项文本。
+
+    返回值：
+      str — UID；若解析失败返回原字符串或空字符串。
+    """
     if not choice:
         return ""
     return choice.split(" - ")[0] if " - " in choice else choice
@@ -51,6 +110,19 @@ def _find_uid_from_choice(choice: str) -> str:
 def _resolve_default_account_choice(
     choices: list[str], active_uid: str | None = None
 ) -> str | None:
+    """
+    从账号选项列表中解析默认选中项。
+
+    核心作用：
+      若提供了 active_uid，则匹配对应的选项；否则返回列表第一项。
+
+    输入参数：
+      choices    : list[str] — 账号选项列表。
+      active_uid : str | None — 当前活跃账号的 UID。
+
+    返回值：
+      str | None — 默认应选中的选项文本。
+    """
     if not choices:
         return None
 
@@ -64,6 +136,15 @@ def _resolve_default_account_choice(
 
 
 def _read_positive_int(value) -> int | None:
+    """
+    读取正整数，无效时返回 None。
+
+    输入参数：
+      value : 任意 — 待转换值。
+
+    返回值：
+      int | None — 大于 0 的整数，或 None。
+    """
     if value is None:
         return None
     try:
@@ -73,7 +154,21 @@ def _read_positive_int(value) -> int | None:
     return num if num > 0 else None
 
 
+# ---------------------------------------------------------------------------
+# 日期与场次相关辅助函数
+# ---------------------------------------------------------------------------
+
 def _iter_project_dates(start_ts: int, end_ts: int):
+    """
+    生成项目起止时间范围内的所有日期字符串。
+
+    输入参数：
+      start_ts : int — 开始时间戳（秒）。
+      end_ts   : int — 结束时间戳（秒）。
+
+    返回值：
+      Generator[str, None, None] — 逐日 yield "YYYY-MM-DD" 格式字符串。
+    """
     start_day = datetime.fromtimestamp(start_ts).date()
     end_day = datetime.fromtimestamp(end_ts).date()
     cursor = start_day
@@ -85,6 +180,23 @@ def _iter_project_dates(start_ts: int, end_ts: int):
 def _fetch_screens_by_date(
     request: BiliRequest, project_id: int, date_str: str
 ) -> list[dict]:
+    """
+    通过 B站 API 按日期获取场次列表。
+
+    核心作用：
+      调用 /api/ticket/project/infoByDate 接口获取指定日期的 screen_list。
+
+    输入参数：
+      request    : BiliRequest — 已登录的请求对象。
+      project_id : int — 项目 ID。
+      date_str   : str — 日期字符串（YYYY-MM-DD）。
+
+    返回值：
+      list[dict] — 场次字典列表。
+
+    异常：
+      RuntimeError — API 返回非 0 错误码时抛出。
+    """
     response = request.get(
         url=f"https://show.bilibili.com/api/ticket/project/infoByDate?id={project_id}&date={date_str}",
     )
@@ -99,6 +211,19 @@ def _fetch_screens_by_date(
 
 
 def _normalize_date_string(value: Any) -> str | None:
+    """
+    将多种格式的日期输入标准化为 YYYY-MM-DD。
+
+    支持的输入格式：
+      - 时间戳（秒或毫秒）
+      - 含分隔符的日期文本，如 "2025年8月3日"、"2025-08-03"
+
+    输入参数：
+      value : Any — 原始日期值。
+
+    返回值：
+      str | None — 标准化后的日期字符串；无法解析时返回 None。
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -125,6 +250,20 @@ def _normalize_date_string(value: Any) -> str | None:
 
 
 def _screen_matches_date(screen: dict[str, Any], date_str: str) -> bool:
+    """
+    判断场次信息是否匹配指定日期。
+
+    核心作用：
+      检查 screen 的 start_time、start_time_str、name 以及 ticket_list 中的
+      screen_name 是否包含与 date_str 相同的日期。
+
+    输入参数：
+      screen   : dict — 场次字典。
+      date_str : str — 目标日期（YYYY-MM-DD）。
+
+    返回值：
+      bool — True 表示匹配。
+    """
     candidates = [
         screen.get("start_time"),
         screen.get("start_time_str"),
@@ -142,6 +281,22 @@ def _screen_matches_date(screen: dict[str, Any], date_str: str) -> bool:
 def _fetch_screens_by_date_with_fallback(
     request: BiliRequest, project_id: int, date_str: str
 ) -> list[dict]:
+    """
+    按日期获取场次，若接口无数据则回退到项目详情页数据匹配。
+
+    核心作用：
+      1. 先调用 _fetch_screens_by_date() 获取官方接口数据。
+      2. 若为空，则调用 fetch_project_payload() 拉取项目详情，
+         手动筛选匹配 date_str 的场次作为兜底。
+
+    输入参数：
+      request    : BiliRequest — 已登录的请求对象。
+      project_id : int — 项目 ID。
+      date_str   : str — 目标日期。
+
+    返回值：
+      list[dict] — 场次列表（可能为空）。
+    """
     screens = _fetch_screens_by_date(request, project_id, date_str)
     if screens:
         return screens
@@ -159,6 +314,16 @@ def _fetch_screens_by_date_with_fallback(
 
 
 def _merge_screens(base_screens: list[dict], extra_screens: list[dict]) -> list[dict]:
+    """
+    合并两组场次列表，按 screen_id 去重。
+
+    输入参数：
+      base_screens  : list[dict] — 基础场次列表。
+      extra_screens : list[dict] — 补充场次列表。
+
+    返回值：
+      list[dict] — 合并去重后的场次列表。
+    """
     merged: list[dict] = []
     seen_screen_ids: set[int] = set()
 
@@ -174,11 +339,33 @@ def _merge_screens(base_screens: list[dict], extra_screens: list[dict]) -> list[
     return merged
 
 
+# ---------------------------------------------------------------------------
+# 格式化与渲染辅助函数
+# ---------------------------------------------------------------------------
+
 def filename_filter(filename):
+    """
+    过滤文件名中的非法字符。
+
+    输入参数：
+      filename : str — 原始文件名。
+
+    返回值：
+      str — 去除 Windows 非法字符后的文件名。
+    """
     return re.sub(r'[/:*?"<>|]', "", filename)
 
 
 def _format_price(price: int | float) -> str:
+    """
+    将分单位价格格式化为人民币字符串。
+
+    输入参数：
+      price : int | float — 价格（单位：分）。
+
+    返回值：
+      str — 形如 "￥128.00" 或 "￥128" 的字符串。
+    """
     return f"￥{price / 100:.2f}".rstrip("0").rstrip(".")
 
 
@@ -188,6 +375,18 @@ def _render_ticket_info_html(
     badge: str | None = None,
     hint: str | None = None,
 ) -> str:
+    """
+    渲染票务信息摘要 HTML。
+
+    输入参数：
+      title : str — 面板标题。
+      lines : list[tuple[str, str]] — (标签, 值) 列表。
+      badge : str | None — 徽章文本（当前未在 HTML 中使用，保留扩展）。
+      hint  : str | None — 提示文本（当前未在 HTML 中使用，保留扩展）。
+
+    返回值：
+      str — 格式化的 HTML 字符串。
+    """
     items_html = "".join(
         (
             '<div class="btb-mini-card">'
@@ -205,6 +404,12 @@ def _render_ticket_info_html(
 
 
 def _empty_ticket_info_updates():
+    """
+    返回清空票务信息 UI 的 Gradio update 列表。
+
+    返回值：
+      list — 包含 6 个 gr.update() 的列表，用于重置下拉框和面板可见性。
+    """
     return [
         gr.update(choices=[], value=None),
         gr.update(choices=[], value=[]),
@@ -216,12 +421,33 @@ def _empty_ticket_info_updates():
 
 
 def _has_invalid_index(indices: list[int], values: list[Any]) -> bool:
+    """
+    检查索引列表是否包含越界或非整数项。
+
+    输入参数：
+      indices : list[int] — 索引列表。
+      values  : list[Any] — 被索引的原始列表。
+
+    返回值：
+      bool — True 表示存在无效索引。
+    """
     return any(
         not isinstance(item, int) or item < 0 or item >= len(values) for item in indices
     )
 
 
 def _format_ticket_option(screen_name: str, ticket: dict, ticket_price: int) -> str:
+    """
+    格式化票档选项文本。
+
+    输入参数：
+      screen_name  : str — 场次名称。
+      ticket       : dict — 票档字典。
+      ticket_price : int — 实际价格（含运费）。
+
+    返回值：
+      str — 形如 "场次名 - 票档描述 - ￥128 - 售票中 - 【起售时间：2025-08-01 12:00】" 的文本。
+    """
     ticket_desc = ticket.get("desc", "")
     sale_start = str(ticket.get("sale_start", "未知"))
     return (
@@ -230,7 +456,17 @@ def _format_ticket_option(screen_name: str, ticket: dict, ticket_price: int) -> 
     )
 
 
+# ---------------------------------------------------------------------------
+# 实名购票人相关辅助函数
+# ---------------------------------------------------------------------------
+
 def _load_people_records() -> list[dict]:
+    """
+    从 people.json 加载本地实名购票人记录。
+
+    返回值：
+      list[dict] — 包含 name 和 personal_id 的字典列表；文件不存在或解析失败返回空列表。
+    """
     people_path = os.path.join(util.EXE_PATH, "people.json")
     if not os.path.exists(people_path):
         return []
@@ -253,6 +489,15 @@ def _load_people_records() -> list[dict]:
 
 
 def _render_people_cards_html(records: list[dict] | None = None) -> str:
+    """
+    渲染实名购票人卡片网格 HTML。
+
+    输入参数：
+      records : list[dict] | None — 购票人记录；None 时自动从 people.json 加载。
+
+    返回值：
+      str — HTML 字符串；无记录时显示空状态提示。
+    """
     if records is None:
         records = _load_people_records()
     if not records:
@@ -280,7 +525,29 @@ def _render_people_cards_html(records: list[dict] | None = None) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# 项目输入解析
+# ---------------------------------------------------------------------------
+
 def _resolve_project_input(project_input: Any) -> tuple[int, int | str, str]:
+    """
+    解析用户输入的项目 ID 或活动链接。
+
+    核心作用：
+      支持纯数字 ID、B站活动详情页 URL，以及带空格的混合格式。
+
+    输入参数：
+      project_input : Any — 用户输入值。
+
+    返回值：
+      tuple[int, int|str, str]
+        - 解析后的整数 ID（用于 API 调用）
+        - 原始 ID 或文本（用于配置显示）
+        - 提示消息
+
+    异常：
+      gr.Error — 输入无效时抛出 Gradio 错误提示。
+    """
     if isinstance(project_input, int):
         return project_input, project_input, ""
 
@@ -313,7 +580,31 @@ def _resolve_project_input(project_input: Any) -> tuple[int, int | str, str]:
     raise gr.Error("请输入活动详情页链接，或直接输入纯数字票务 ID。")
 
 
+# ---------------------------------------------------------------------------
+# 获取票务信息（核心回调）
+# ---------------------------------------------------------------------------
+
 def on_submit_ticket_id(num):
+    """
+    "获取票务信息"按钮回调。
+
+    核心作用：
+      1. 解析项目 ID，调用 fetch_project_payload() 获取项目详情。
+      2. 按日期拉取每日场次并合并去重。
+      3. 获取关联商品（周边）信息并加入票档列表。
+      4. 获取购票人列表和收货地址列表。
+      5. 输出票务信息、票档选项、购票人选项、地址选项等 UI 更新。
+
+    输入参数：
+      num : Any — 用户输入的项目 ID 或链接。
+
+    返回值：
+      list — 6 个 Gradio update 对象，用于更新票档、购票人、地址、详情面板等组件。
+
+    异常处理：
+      - 未登录时给出明确提示。
+      - 其他异常记录日志并清空 UI。
+    """
     global buyer_value
     global addr_value
     global ticket_value
@@ -506,6 +797,15 @@ def on_submit_ticket_id(num):
 
 
 def extract_id_from_url(url):
+    """
+    从 B站活动详情页 URL 中提取项目 ID。
+
+    输入参数：
+      url : str — 活动详情页链接。
+
+    返回值：
+      str | None — 提取到的数字 ID；失败返回 None。
+    """
     parsed_url = urlparse(url)
     query_params = parse_qs(parsed_url.query)
     ticket_id = query_params.get("id", [None])[0]
@@ -513,6 +813,10 @@ def extract_id_from_url(url):
         return ticket_id
     return None
 
+
+# ---------------------------------------------------------------------------
+# 生成配置（核心回调）
+# ---------------------------------------------------------------------------
 
 def on_submit_all(
     ticket_id,
@@ -522,6 +826,27 @@ def on_submit_all(
     people_buyer_phone,
     address_index,
 ):
+    """
+    "生成配置"按钮回调。
+
+    核心作用：
+      校验用户输入，组装抢票所需完整配置字典，保存为 JSON 文件，
+      并返回配置内容和文件路径供用户下载。
+
+    输入参数：
+      ticket_id          : Any — 活动链接或项目 ID。
+      ticket_info        : int — 选中的票档索引。
+      people_indices     : list[int] — 选中的购票人索引列表。
+      people_buyer_name  : str — 联系人姓名。
+      people_buyer_phone : str — 联系人电话。
+      address_index      : int — 选中的地址索引。
+
+    返回值：
+      list — [gr.update(value=config_dir, visible=True), gr.update(value=filename, visible=True)]。
+
+    异常：
+      gr.Error — 任何校验失败或生成异常时抛出。
+    """
     try:
         if ticket_id is None:
             raise gr.Error("请输入正确的活动链接。")
@@ -615,7 +940,18 @@ def on_submit_all(
 
 
 def upload_file(filepath):
-    """导入 cookie 文件并添加到账号池"""
+    """
+    导入 Cookie 文件并添加到账号池。
+
+    输入参数：
+      filepath : str — Cookie JSON 文件路径。
+
+    返回值：
+      list — [gr.update(value=GLOBAL_COOKIE_PATH), gr.update(choices=..., value=...)]。
+
+    异常：
+      gr.Error — 导入失败时抛出。
+    """
     try:
         temp_request = BiliRequest(cookies_config_path=filepath)
         cookies = temp_request.cookieManager.get_cookies()
@@ -640,7 +976,22 @@ def upload_file(filepath):
         raise gr.Error("登录信息导入失败，请检查文件格式。")
 
 
+# ---------------------------------------------------------------------------
+# 浏览器与 Cookie 工具函数
+# ---------------------------------------------------------------------------
+
 def _find_browser_exe() -> str | None:
+    """
+    查找系统中可用的浏览器可执行文件路径。
+
+    搜索顺序：
+      1. msedge（系统 PATH）
+      2. chrome（系统 PATH）
+      3. Edge/Chrome 的默认安装路径（Windows）
+
+    返回值：
+      str | None — 浏览器可执行文件完整路径；未找到返回 None。
+    """
     candidates = [
         shutil.which("msedge"),
         shutil.which("chrome"),
@@ -664,6 +1015,17 @@ def _find_browser_exe() -> str | None:
 
 
 def _open_bilibili_with_cookies():
+    """
+    用当前 Cookie 打开 B站，并生成注入脚本复制到剪贴板。
+
+    核心作用：
+      1. 将当前账号 Cookie 拼接为 JavaScript document.cookie 注入代码。
+      2. 复制到系统剪贴板。
+      3. 启动浏览器（Edge/Chrome）并自动打开 DevTools，
+         用户只需在 Console 中粘贴脚本即可登录。
+
+    返回值：无（通过 gr.Info 提示用户操作步骤）。
+    """
     cookies = util.main_request.cookieManager.get_cookies(force=True)
     if not cookies:
         gr.Warning("当前无登录信息，请先登录", duration=5)
@@ -720,7 +1082,28 @@ def _open_bilibili_with_cookies():
     )
 
 
+# ---------------------------------------------------------------------------
+# login_tab — 账号登录标签页
+# ---------------------------------------------------------------------------
+
 def login_tab():
+    """
+    构建"账号登录"标签页。
+
+    核心作用：
+      1. 提供手机号配置（可选）。
+      2. 提供 B站二维码扫码登录流程（生成二维码 -> 扫码 -> 轮询登录状态）。
+      3. 提供账号下拉框管理（切换、删除、刷新）。
+      4. 支持导入现有 Cookie 文件、用 Cookie 打开 B站。
+      5. 支持从 B站导入实名购票人并展示卡片网格。
+
+    返回值：
+      tuple — (load_login_accounts 回调函数, [account_dropdown 输出组件列表])，
+              供 ticker.py 在页面加载时刷新账号列表。
+
+    调用场景：
+      ticker_cmd() 中注册"账号登录"标签页时调用。
+    """
     with gr.Column(elem_classes="btb-page-section"):
         with gr.Accordion(
             label="填写当前账号绑定的手机号（可选）",
@@ -734,11 +1117,35 @@ def login_tab():
             )
 
             def input_phone(_phone):
+                """
+                手机号输入框变更回调。
+
+                核心作用：
+                  将用户输入的手机号持久化到 CookieManager 配置中，供后续抢票验证使用。
+
+                输入参数：
+                  _phone : str — 用户输入的手机号。
+
+                返回值：无。
+
+                调用场景：
+                  login_tab() 中 phone_gate_ui 组件值变化时触发。
+                """
                 util.main_request.cookieManager.set_config_value("phone", _phone)
 
             phone_gate_ui.change(fn=input_phone, inputs=phone_gate_ui, outputs=None)
 
         def generate_qrcode():
+            """
+            生成 B站登录二维码。
+
+            核心作用：
+              调用 B站 passport 接口获取二维码 URL 和 qrcode_key，
+              生成 PNG 图片并保存到临时目录。
+
+            返回值：
+              tuple[str|None, str] — (图片路径, qrcode_key)；失败返回 (None, 错误消息)。
+            """
             headers = {
                 "user-agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -773,6 +1180,21 @@ def login_tab():
             return None, "二维码生成失败"
 
         def poll_login(qrcode_key):
+            """
+            轮询 B站二维码登录状态。
+
+            核心作用：
+              最多轮询 120 次（约 60 秒），检测扫码结果：
+              - code=0：登录成功，返回 cookies。
+              - code=86101/86090：等待扫码/已扫码未确认，继续轮询。
+              - 其他：返回错误消息。
+
+            输入参数：
+              qrcode_key : str — 二维码唯一标识。
+
+            返回值：
+              tuple[str, list|None] — (状态消息, cookies 列表或 None)。
+            """
             headers = {"User-Agent": "Mozilla/5.0"}
             for _ in range(120):
                 res = requests.get(
@@ -798,6 +1220,12 @@ def login_tab():
             return "登录超时，请重试。", None
 
         def start_login():
+            """
+            启动登录流程：生成二维码。
+
+            返回值：
+              tuple[str|None, str] — (图片路径, qrcode_key 或错误消息)。
+            """
             img_path, qrcode_key = generate_qrcode()
             if not img_path:
                 return None, "二维码生成失败"
@@ -806,13 +1234,31 @@ def login_tab():
         qrcode_key_state = gr.State("")
 
         def _get_account_choices():
+            """
+            获取当前账号池的所有选项文本。
+
+            返回值：
+              list[str] — 账号选项列表。
+            """
             accounts = util.main_request.cookieManager.get_accounts()
             return [_format_account_choice(a.uid, a.name, a.level, a.is_vip) for a in accounts]
 
         def _get_default_account_choice() -> str | None:
+            """
+            获取默认选中的账号选项。
+
+            返回值：
+              str | None — 默认选项文本。
+            """
             return _get_default_account_choice_from(_get_account_choices())
 
         def _get_default_account_choice_from(choices: list[str]) -> str | None:
+            """
+            从给定选项列表中解析默认选中项。
+
+            核心作用：
+              若当前有活跃 Cookie，则优先选中对应账号。
+            """
             active_uid = None
             if util.main_request.cookieManager.have_cookies():
                 active_uid = util.main_request.cookieManager.get_cookies_value(
@@ -821,6 +1267,12 @@ def login_tab():
             return _resolve_default_account_choice(choices, active_uid=active_uid)
 
         def load_login_accounts():
+            """
+            加载账号列表并返回 Gradio update。
+
+            返回值：
+              gr.update — 更新 account_dropdown 的 choices 和 value。
+            """
             choices = _get_account_choices()
             return gr.update(
                 choices=choices,
@@ -828,6 +1280,15 @@ def login_tab():
             )
 
         def _activate_account(account) -> None:
+            """
+            激活指定账号：重建 main_request 并验证登录状态。
+
+            输入参数：
+              account : Account — 账号对象。
+
+            核心作用：
+              切换全局 main_request 为指定账号，若昵称获取为"未登录"则提示 Cookie 过期。
+            """
             set_main_request(BiliRequest(cookies_config_path=GLOBAL_COOKIE_PATH))
             util.main_request.cookieManager.db.insert("cookie", account.cookies)
             name = util.main_request.get_request_name()
@@ -899,6 +1360,12 @@ def login_tab():
                 )
 
         def on_login_click():
+            """
+            "点击生成登录二维码"按钮回调。
+
+            返回值：
+              list — [gr.update(value=img_path, visible=True), qrcode_key]。
+            """
             img_path, msg_or_key = start_login()
             if img_path:
                 gr.Info("已生成二维码，请用 B 站客户端扫码", duration=5)
@@ -913,6 +1380,18 @@ def login_tab():
             ]
 
         def on_check_login(key):
+            """
+            "扫码后点击确认登录"按钮回调。
+
+            核心作用：
+              轮询登录状态，成功后将账号添加到账号池并激活。
+
+            输入参数：
+              key : str — qrcode_key。
+
+            返回值：
+              list — 更新文件 UI、二维码图片、确认按钮、账号下拉框、qrcode_key 状态的 Gradio update 列表。
+            """
             if not key:
                 return [
                     gr.update(),
@@ -952,6 +1431,18 @@ def login_tab():
             ]
 
         def on_dropdown_change(choice):
+            """
+            账号下拉框切换回调。
+
+            核心作用：
+              切换活跃账号，并自动从 B站重新导入实名购票人。
+
+            输入参数：
+              choice : str — 选中的账号选项文本。
+
+            返回值：
+              list — [gr.update(value=GLOBAL_COOKIE_PATH), gr.update(), people_cards_html]。
+            """
             uid = _find_uid_from_choice(choice)
             if not uid:
                 return [gr.update(), gr.update(), _render_people_cards_html()]
@@ -974,6 +1465,18 @@ def login_tab():
             ]
 
         def on_delete_account(choice):
+            """
+            "删除当前账号"按钮回调。
+
+            核心作用：
+              删除指定 UID 的账号；若删除的是当前活跃账号，则自动切换到下一个账号。
+
+            输入参数：
+              choice : str — 选中的账号选项文本。
+
+            返回值：
+              list — [gr.update(value=GLOBAL_COOKIE_PATH), gr.update(choices=..., value=...), gr.update()]。
+            """
             uid = _find_uid_from_choice(choice)
             if not uid:
                 gr.Warning("请先选择一个账号", duration=5)
@@ -1023,6 +1526,12 @@ def login_tab():
             ]
 
         def on_refresh_accounts():
+            """
+            "刷新账号列表"按钮回调。
+
+            返回值：
+              gr.update — 更新账号下拉框的选项和默认值。
+            """
             set_main_request(BiliRequest(cookies_config_path=GLOBAL_COOKIE_PATH))
             new_choices = _get_account_choices()
             gr.Info(f"已刷新账号列表，共 {len(new_choices)} 个账号", duration=3)
@@ -1032,6 +1541,19 @@ def login_tab():
             )
 
         def _import_people_from_bili() -> tuple[str, list[dict]]:
+            """
+            从 B站接口导入实名购票人并保存到 people.json。
+
+            核心作用：
+              调用 /api/ticket/buyer/list?nomask=1 获取完整身份证信息，
+              过滤有效记录后写入 util.EXE_PATH/people.json。
+
+            返回值：
+              tuple[str, list[dict]] — (文件路径, 购票人记录列表)。
+
+            异常：
+              gr.Error — 接口返回错误或没有购票人时抛出。
+            """
             url = "https://show.bilibili.com/api/ticket/buyer/list?nomask=1"
             resp = util.main_request.get(url=url).json()
             if resp.get("errno") not in (0, 1) or not resp.get("data"):
@@ -1057,6 +1579,12 @@ def login_tab():
             return people_path, records
 
         def on_import_people():
+            """
+            "从B站导入实名购票人"按钮回调。
+
+            返回值：
+              list — [文件路径, people_cards_html]。
+            """
             people_path, records = _import_people_from_bili()
             gr.Info(
                 f"已从 B 站导入 {len(records)} 位实名购票人，保存到 {people_path}",
@@ -1068,6 +1596,9 @@ def login_tab():
 
         @gr.on(qrcode_key_state.change, inputs=qrcode_key_state, outputs=check_btn)
         def qrcode_key_state_change(key):
+            """
+            qrcode_key 状态变化时显示/隐藏确认登录按钮。
+            """
             return gr.update(visible=bool(key))
 
         check_btn.click(
@@ -1121,7 +1652,25 @@ def login_tab():
     return load_login_accounts, [account_dropdown]
 
 
+# ---------------------------------------------------------------------------
+# setting_tab — 生成配置标签页
+# ---------------------------------------------------------------------------
+
 def setting_tab():
+    """
+    构建"生成配置"标签页。
+
+    核心作用：
+      1. 提供活动链接输入框和"获取票务信息"按钮。
+      2. 获取成功后展示票档、日期、联系人、收货地址、实名购票人选择器。
+      3. 日期变更时按日期刷新票档列表。
+      4. "生成配置"按钮组装完整抢票配置并导出 JSON 文件。
+
+    返回值：无（纯 Gradio 组件构建函数）。
+
+    调用场景：
+      ticker_cmd() 中注册"生成配置"标签页时调用。
+    """
     with gr.Column(elem_classes="btb-page-section"):
         with gr.Column(elem_classes="btb-card btb-card-sky btb-layout-card"):
             gr.HTML(
@@ -1242,6 +1791,15 @@ def setting_tab():
             )
 
             def on_submit_data(_date):
+                """
+                日期下拉框变更回调：按所选日期刷新票档列表。
+
+                输入参数：
+                  _date : str — 选中的日期字符串。
+
+                返回值：
+                  list — [date_ui update, ticket_info_ui update, info_ui update]。
+                """
                 global ticket_str_list
                 global ticket_value
                 global is_hot_project

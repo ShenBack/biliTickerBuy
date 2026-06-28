@@ -1,3 +1,31 @@
+"""
+tab/share.py — 选票分享服务（FastAPI 独立服务）。
+
+文件整体功能：
+  提供一个可独立运行的 FastAPI 服务，用于将“生成配置”能力以网页形式分享给他人：
+  1. 启动本地 HTTP 服务（uvicorn）和可选的 Cloudflare Tunnel 公网入口。
+  2. 提供二维码扫码登录接口，让被分享者使用自己的 B站账号登录。
+  3. 登录后自动拉取项目票档、实名购票人、收货地址。
+  4. 被分享者选择票档、购票人、地址后提交，服务端生成完整抢票 JSON 配置并保存，
+     同时将登录账号汇入本地账号池。
+  5. 通过飞书 Webhook 推送生成结果。
+
+所属模块：
+  UI/网络共享层 (tab)
+
+依赖文件：
+  - util.EXE_PATH            (项目/可执行文件根目录)
+  - util.request.BiliRequest (B站 HTTP 请求封装)
+  - interface.project        (fetch_project_payload 拉取项目详情)
+  - util.CookieManager       (parse_cookie_list / add_account)
+
+对外能力：
+  - start_share_server(project_id, port) → 启动本地 FastAPI 服务，返回监听端口。
+  - start_cloudflare_tunnel(port)       → 启动 cloudflared 公网隧道，返回公网 URL。
+  - stop_cloudflare_tunnel()            → 停止 cloudflared 隧道。
+  - share_page(project_id)              → FastAPI 路由，设置当前分享项目 ID 并返回选票页面。
+"""
+
 from __future__ import annotations
 
 import json
@@ -20,19 +48,40 @@ from pydantic import BaseModel
 from util import EXE_PATH
 from util.request.BiliRequest import BiliRequest
 
+# 飞书机器人 Webhook 地址，用于提交成功后推送配置文本
 FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/1dd7ee3b-f730-426c-8a90-ee1533c6222e"
 
+# FastAPI 应用实例
 _app = FastAPI()
+# 后台运行的 uvicorn 服务线程
 _server_thread: threading.Thread | None = None
+# 当前服务监听端口
 _running_port: int = 0
 
+# 当前分享的项目 ID
 _project_id: int = 0
+# cloudflared 子进程句柄
 _tunnel_process = None
+# 当前隧道公网 URL
 _tunnel_url: str = ""
 
 
 def _find_cloudflared() -> str | None:
-    """在多个候选位置查找 cloudflared 可执行文件"""
+    """
+    在多个候选位置查找 cloudflared 可执行文件。
+
+    搜索顺序：
+      1. 系统 PATH。
+      2. EXE_PATH（项目/可执行文件根目录）。
+      3. PyInstaller 临时解压目录（打包后的运行环境）。
+      4. 当前工作目录。
+
+    返回值：
+      str | None — 可执行文件绝对路径；未找到返回 None。
+
+    调用场景：
+      start_cloudflare_tunnel() 中启动隧道前定位 cloudflared。
+    """
     exe_name = "cloudflared.exe" if sys.platform == "win32" else "cloudflared"
 
     # 1. 系统 PATH
@@ -61,6 +110,23 @@ def _find_cloudflared() -> str | None:
 
 
 def start_share_server(project_id: int, port: int = 7862) -> int:
+    """
+    启动本地 FastAPI 分享服务。
+
+    核心作用：
+      在独立后台线程中运行 uvicorn，监听 0.0.0.0:port；
+      若服务已启动则直接返回当前端口，避免重复启动。
+
+    输入参数：
+      project_id : int — 当前要分享的项目 ID。
+      port       : int — 服务监听端口，默认 7862。
+
+    返回值：
+      int — 实际监听端口。
+
+    调用场景：
+      tab.go 中“开启分享”按钮点击后启动服务。
+    """
     global _server_thread, _running_port, _project_id
     _project_id = project_id
     _running_port = port
@@ -78,7 +144,25 @@ def start_share_server(project_id: int, port: int = 7862) -> int:
 
 
 def start_cloudflare_tunnel(port: int) -> str:
-    """启动 cloudflare tunnel，返回公网 URL"""
+    """
+    启动 cloudflare tunnel，返回公网 URL。
+
+    核心作用：
+      调用本地 cloudflared 创建 trycloudflare.com 临时隧道，
+      从 stderr 输出中解析公网 URL，使外部用户可访问本地分享服务。
+
+    输入参数：
+      port : int — 本地服务端口。
+
+    返回值：
+      str — 公网访问 URL。
+
+    异常：
+      RuntimeError — 未找到 cloudflared、启动失败或超时时抛出。
+
+    调用场景：
+      tab.go 中需要生成公网分享链接时调用。
+    """
     global _tunnel_process, _tunnel_url
 
     if _tunnel_process and _tunnel_process.poll() is None:
@@ -121,6 +205,17 @@ def start_cloudflare_tunnel(port: int) -> str:
 
 
 def stop_cloudflare_tunnel():
+    """
+    停止 cloudflare tunnel。
+
+    核心作用：
+      终止 cloudflared 子进程并清空隧道 URL，便于重新创建或退出程序。
+
+    返回值：无。
+
+    调用场景：
+      程序退出或切换分享项目时调用。
+    """
     global _tunnel_process, _tunnel_url
     if _tunnel_process and _tunnel_process.poll() is None:
         _tunnel_process.kill()
@@ -133,11 +228,33 @@ def stop_cloudflare_tunnel():
 
 @_app.get("/api/project_id")
 def api_project_id():
+    """
+    获取当前分享的项目 ID。
+
+    返回值：
+      dict — {"project_id": int}。
+
+    调用场景：
+      前端页面初始化时确认当前分享的是哪个项目。
+    """
     return {"project_id": _project_id}
 
 
 @_app.get("/api/qr/generate")
 def api_qr_generate():
+    """
+    生成 B站网页端二维码。
+
+    核心作用：
+      调用 B站 passport 接口获取二维码 URL 和 qrcode_key，
+      供前端渲染二维码图片，实现被分享者扫码登录。
+
+    返回值：
+      dict — {"ok": True, "url": str, "qrcode_key": str} 或 {"ok": False, "error": str}。
+
+    调用场景：
+      分享页面 Step 1 初始化二维码时调用。
+    """
     headers = {
         "user-agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -160,6 +277,21 @@ def api_qr_generate():
 
 @_app.get("/api/qr/poll")
 def api_qr_poll(qrcode_key: str):
+    """
+    轮询 B站二维码登录状态。
+
+    核心作用：
+      前端扫码后周期性调用此接口，直到登录成功或超时。
+
+    输入参数：
+      qrcode_key : str — 二维码唯一标识。
+
+    返回值：
+      dict — 包含 ok、status（confirmed / waiting / failed）、cookies、message 等字段。
+
+    调用场景：
+      分享页面 Step 1 pollQR() 中周期性调用。
+    """
     resp = http_requests.get(
         "https://passport.bilibili.com/x/passport-login/web/qrcode/poll",
         params={"qrcode_key": qrcode_key},
@@ -182,6 +314,15 @@ def api_qr_poll(qrcode_key: str):
 
 
 class CookiesBody(BaseModel):
+    """
+    携带 cookies 列表的请求体模型。
+
+    属性：
+      cookies : list[dict[str, str]] — B站登录后的 cookie 字典列表。
+
+    使用场景：
+      /api/project、/api/buyers、/api/addresses 等需要身份认证的接口。
+    """
     cookies: list[dict[str, str]]
 
 
@@ -190,11 +331,26 @@ import uuid as _uuid
 
 # 按 session_id 隔离的会话存储：{session_id: {"cookies": ..., "time": ...}}
 _sessions: dict[str, dict] = {}
-SESSION_TTL = 36000  # 10 hour
+# 会话有效期，单位秒（10 小时）
+SESSION_TTL = 36000
 
 
 def _get_session_id(request) -> str:
-    """从请求 Cookie 中读取 session_id，没有则生成一个新的"""
+    """
+    从请求 Cookie 中读取 session_id。
+
+    核心作用：
+      检查请求中是否携带有效的 btb_sid Cookie；有效则返回该 session_id，否则返回空字符串。
+
+    输入参数：
+      request : Request — FastAPI Request 对象。
+
+    返回值：
+      str — 已存在的有效 session_id，或空字符串。
+
+    调用场景：
+      api_session() / api_project() 中识别当前浏览器会话。
+    """
     sid = request.cookies.get("btb_sid")
     if sid and sid in _sessions:
         return sid
@@ -202,15 +358,48 @@ def _get_session_id(request) -> str:
 
 
 def _new_session_id() -> str:
+    """
+    生成新的 session_id。
+
+    返回值：
+      str — 16 位十六进制随机字符串。
+
+    调用场景：
+      api_session() / api_project() 中为新的浏览器会话创建标识。
+    """
     return _uuid.uuid4().hex[:16]
 
 
 def _save_session(session_id: str, cookies: list[dict[str, str]]):
+    """
+    保存会话 cookies 并清理过期会话。
+
+    输入参数：
+      session_id : str — 会话 ID。
+      cookies    : list[dict[str, str]] — 该会话对应的 B站 cookies。
+
+    返回值：无。
+
+    调用场景：
+      api_project() / api_session() 中登录成功后保存会话。
+    """
     _sessions[session_id] = {"cookies": cookies, "time": _time.time()}
     _cleanup_sessions()
 
 
 def _get_session(session_id: str) -> list[dict[str, str]] | None:
+    """
+    获取指定会话的 cookies（未过期时）。
+
+    输入参数：
+      session_id : str — 会话 ID。
+
+    返回值：
+      list[dict[str, str]] | None — 有效 cookies 列表；不存在或已过期返回 None。
+
+    调用场景：
+      api_session() 中恢复会话登录状态。
+    """
     entry = _sessions.get(session_id)
     if entry and entry["cookies"] and _time.time() - entry["time"] < SESSION_TTL:
         return entry["cookies"]
@@ -218,6 +407,14 @@ def _get_session(session_id: str) -> list[dict[str, str]] | None:
 
 
 def _cleanup_sessions():
+    """
+    清理超过 SESSION_TTL 的过期会话。
+
+    返回值：无。
+
+    调用场景：
+      _save_session() 中保存新会话后自动清理，防止内存无限增长。
+    """
     now = _time.time()
     expired = [k for k, v in _sessions.items() if now - v["time"] >= SESSION_TTL]
     for k in expired:
@@ -228,6 +425,21 @@ from fastapi import Request
 
 @_app.get("/api/session")
 def api_session(request: Request):
+    """
+    获取或创建浏览器会话。
+
+    核心作用：
+      若请求携带有效 session_id，则返回对应 cookies；否则创建新会话并下发 btb_sid Cookie。
+
+    输入参数：
+      request : Request — FastAPI Request 对象。
+
+    返回值：
+      JSONResponse — {"ok": True, "cookies": ...} 或 {"ok": False, "session_id": ...}。
+
+    调用场景：
+      分享页面加载时首先调用，用于恢复登录状态或进入二维码登录流程。
+    """
     sid = _get_session_id(request)
     saved = _get_session(sid) if sid else None
     if saved:
@@ -242,6 +454,25 @@ def api_session(request: Request):
 
 @_app.post("/api/project")
 def api_project(body: CookiesBody, http_request: Request):
+    """
+    获取当前分享项目的票档信息。
+
+    核心作用：
+      1. 保存/恢复浏览器会话 cookies。
+      2. 使用 cookies 创建 BiliRequest，拉取项目详情。
+      3. 按场次整理票档列表，含实际价格（电子票免运费）。
+      4. 同步服务器下发的最新 cookies 并返回给前端。
+
+    输入参数：
+      body        : CookiesBody — 请求体，包含 cookies。
+      http_request : Request — FastAPI Request 对象。
+
+    返回值：
+      JSONResponse — 项目 ID、名称、是否热门、场次票档列表、同步后的 cookies。
+
+    调用场景：
+      分享页面登录成功后 loadProject() 中调用。
+    """
     sid = _get_session_id(http_request)
     if not sid:
         sid = _new_session_id()
@@ -299,6 +530,18 @@ def api_project(body: CookiesBody, http_request: Request):
 
 @_app.post("/api/buyers")
 def api_buyers(body: CookiesBody):
+    """
+    获取当前账号的实名购票人列表。
+
+    输入参数：
+      body : CookiesBody — 请求体，包含 cookies。
+
+    返回值：
+      dict — {"ok": True, "buyers": list[dict]}。
+
+    调用场景：
+      分享页面 Step 3 加载购票人时调用。
+    """
     request = BiliRequest(cookies=body.cookies, proxy="none")
     resp = request.get(
         url="https://show.bilibili.com/api/ticket/buyer/list?is_default&projectId=" + str(_project_id)
@@ -309,6 +552,18 @@ def api_buyers(body: CookiesBody):
 
 @_app.post("/api/addresses")
 def api_addresses(body: CookiesBody):
+    """
+    获取当前账号的收货地址列表。
+
+    输入参数：
+      body : CookiesBody — 请求体，包含 cookies。
+
+    返回值：
+      dict — {"ok": True, "addresses": list[dict]}，地址字典包含 id、name、tel、addr、display。
+
+    调用场景：
+      分享页面 Step 3 加载收货地址时调用。
+    """
     request = BiliRequest(cookies=body.cookies, proxy="none")
     resp = request.get(url="https://show.bilibili.com/api/ticket/addr/list").json()
     addrs = resp.get("data", {}).get("addr_list", [])
@@ -328,6 +583,30 @@ def api_addresses(body: CookiesBody):
 
 
 class SubmitBody(BaseModel):
+    """
+    提交选票配置的请求体模型。
+
+    属性：
+      cookies          : list[dict[str, str]] — B站登录 cookies。
+      screen_id        : int — 场次 ID。
+      sku_id           : int — 票档（sku）ID。
+      project_id       : int — 项目 ID。
+      project_name     : str — 项目名称。
+      is_hot_project   : bool — 是否为热门项目。
+      sale_start       : str — 起售时间。
+      sale_flag_number : int — 销售状态码。
+      price            : int — 单张票价（分）。
+      screen_name      : str — 场次名称。
+      ticket_desc      : str — 票档描述。
+      count            : int — 购买数量。
+      buyer_name       : str — 联系人姓名。
+      buyer_phone      : str — 联系人电话。
+      buyer_info       : list[dict[str, Any]] — 实名购票人列表。
+      deliver_info     : dict[str, Any] — 收货地址信息。
+
+    使用场景：
+      /api/submit 接口接收前端提交并生成抢票配置。
+    """
     cookies: list[dict[str, str]]
     screen_id: int
     sku_id: int
@@ -348,6 +627,25 @@ class SubmitBody(BaseModel):
 
 @_app.post("/api/submit")
 def api_submit(body: SubmitBody):
+    """
+    接收前端选票结果并生成抢票配置。
+
+    核心作用：
+      1. 使用 cookies 创建 BiliRequest，获取当前登录用户名并同步最新 cookies。
+      2. 补齐默认收货地址（地址为空时）。
+      3. 构建符合抢票任务要求的 JSON 配置，保存到“项目/{project_name}/”目录。
+      4. 将扫码登录的账号保存到本地 cookies.json 账号池。
+      5. 通过飞书 Webhook 推送配置文本。
+
+    输入参数：
+      body : SubmitBody — 前端提交的选票信息。
+
+    返回值：
+      dict — {"ok": True, "feishu_ok": bool, "config": dict}。
+
+    调用场景：
+      分享页面 Step 3 点击“确认发送”后 doSubmit() 调用。
+    """
     request = BiliRequest(cookies=body.cookies, proxy="none")
     try:
         username = request.get_request_name()
@@ -444,7 +742,8 @@ def api_submit(body: SubmitBody):
 
 # ─── HTML ─────────────────────────────────────────────────────────────────────
 
-HTML_PAGE = """<!DOCTYPE html>
+# 分享页面完整前端 HTML（含 QR 登录、票档选择、购票人/地址选择、提交确认）
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"/>
@@ -452,7 +751,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <title>选票</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;background:#f5f5f5;color:#333;padding:20px}
+body{font-family:"Google Sans","Roboto","Noto Sans SC","PingFang SC",system-ui,sans-serif;background:#f5f5f5;color:#333;padding:20px}
 .container{max-width:640px;margin:0 auto}
 h1{text-align:center;margin-bottom:24px;font-size:22px;color:#fb7299}
 .step{display:none;background:#fff;border-radius:12px;padding:24px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
@@ -630,7 +929,7 @@ function renderTickets(data){
       const card = document.createElement('div');
       card.className='ticket-card';
       const soldOut = [1,3,5,101,102,103,105,106].includes(t.sale_flag_number);
-      const priceStr = '￥'+(t.price/100).toFixed(2).replace(/\\.?0+$/,'');
+      const priceStr = '￥'+(t.price/100).toFixed(2).replace(/\.?0+$/,'');
       card.innerHTML=`<div class="ticket-name">${esc(screen.name)} - ${esc(t.desc)} <span class="tag tag-hot">${priceStr}</span>${soldOut?'<span class="tag tag-sold">不可售</span>':''}</div><div class="ticket-info">起售时间: ${esc(t.sale_start||'未知')}</div>`;
       card.dataset.screenId=screen.id;
       card.dataset.screenName=screen.name;
@@ -716,8 +1015,8 @@ function confirmSubmit(){
 
   const buyerNames=selectedBuyers.map(b=>b.name).join('、');
   const addrDisplay=addrData?addrData.display:'未选择地址';
-  const priceStr='￥'+(selectedTicket.price/100).toFixed(2).replace(/\\.?0+$/,'');
-  const totalPrice='￥'+(selectedTicket.price*selectedBuyers.length/100).toFixed(2).replace(/\\.?0+$/,'');
+  const priceStr='￥'+(selectedTicket.price/100).toFixed(2).replace(/\.?0+$/,'');
+  const totalPrice='￥'+(selectedTicket.price*selectedBuyers.length/100).toFixed(2).replace(/\.?0+$/,'');
 
   const html=`
     <div><b>项目：</b>${esc(projectData?projectData.project_name:'')}</div>
@@ -750,8 +1049,8 @@ async function doSubmit(){
 
   const buyerNames=selectedBuyers.map(b=>b.name).join('、');
   const addrDisplay=addrData?addrData.display:'未选择地址（将使用默认地址）';
-  const priceStr='￥'+(selectedTicket.price/100).toFixed(2).replace(/\\.?0+$/,'');
-  const totalPrice='￥'+(selectedTicket.price*selectedBuyers.length/100).toFixed(2).replace(/\\.?0+$/,'');
+  const priceStr='￥'+(selectedTicket.price/100).toFixed(2).replace(/\.?0+$/,'');
+  const totalPrice='￥'+(selectedTicket.price*selectedBuyers.length/100).toFixed(2).replace(/\.?0+$/,'');
 
   const summaryHtml=`
     <div><b>项目：</b>${esc(projectData?projectData.project_name:'')}</div>
@@ -826,11 +1125,32 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 
 @_app.get("/", response_class=HTMLResponse)
 def index():
+    """
+    分享服务首页路由。
+
+    返回值：
+      HTMLResponse — 返回选票页面 HTML。
+
+    调用场景：
+      用户访问本地服务根路径或公网隧道根路径时展示选票页面。
+    """
     return HTML_PAGE
 
 
 @_app.get("/share/{project_id}", response_class=HTMLResponse)
 def share_page(project_id: int):
+    """
+    设置当前分享项目 ID 并返回选票页面。
+
+    输入参数：
+      project_id : int — 要分享的项目 ID。
+
+    返回值：
+      HTMLResponse — 返回选票页面 HTML。
+
+    调用场景：
+      外部通过 /share/{project_id} 链接访问时，先设置项目再展示页面。
+    """
     global _project_id
     _project_id = project_id
     return HTML_PAGE

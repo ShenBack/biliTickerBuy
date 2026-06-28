@@ -1,3 +1,10 @@
+"""
+文件整体功能：配置并初始化 Loguru 日志系统。
+所属模块：util.log
+依赖文件：无外部业务依赖，使用 loguru 第三方库。
+对外能力：提供 loguru_config 函数，统一设置文件日志与终端日志的级别、格式、保留策略等。
+"""
+
 import os
 import sys
 from loguru import logger
@@ -15,9 +22,21 @@ def loguru_config(
     """
     配置 Loguru 日志系统。
 
-    :param log_file_path: 日志文件的名称，会存储到 LOG_DIR 目录下"
-    :param file_colorize: 是否为文件日志写入颜色控制符，默认关闭
-    :param enable_console: 是否启用终端输出
+    参数：
+        log_dir (str)：日志文件存放目录。
+        log_file_name (str)：日志文件名称。
+        file_colorize (bool)：是否在文件日志中写入颜色控制符，默认关闭。
+        enable_console (bool)：是否启用终端输出，默认开启。
+        file_level (str | None)：文件日志级别，None 则读取 BTB_LOG_LEVEL 环境变量，默认 DEBUG。
+        console_level (str | None)：终端日志级别，None 则读取 BTB_CONSOLE_LOG_LEVEL 环境变量，默认 INFO。
+        retention_days (int | None)：日志保留天数，None 则读取 BTB_LOG_RETENTION_DAYS 环境变量，默认 7。
+    返回值：str，最终日志文件的完整路径。
+    内部逻辑：
+        1. 移除 Loguru 默认 sink；
+        2. 解析文件/终端日志级别与保留天数；
+        3. 添加按天轮转的文本日志 sink；
+        4. 若 enable_console 为 True，再添加 stderr 终端 sink。
+    调用位置：util/__init__.py 在模块导入时调用，完成全局日志初始化。
     """
     logger.remove()
 

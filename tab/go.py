@@ -1,4 +1,29 @@
-﻿import datetime
+"""
+tab/go.py — 抢票操作与任务管理页面。
+
+文件整体功能：
+  提供 Gradio UI 的“操作抢票”标签页（go_start_tab），包含以下核心能力：
+  1. 上传抢票配置文件（JSON），支持多文件同时上传，每个文件对应一个独立抢票任务。
+  2. 配置预览：解析并渲染上传配置中的账号、票数、单价、购票人实名等信息。
+  3. 代理状态监控：展示已配置代理的连通性、延时、使用状态、出口 IP 等。
+  4. 抢票时间选择：通过原生 datetime-local 输入框设置抢票开始时间，支持自动填写。
+  5. 任务启动：根据代理分配策略（均衡/队列）启动子进程执行抢票，自动限制并发数量。
+  6. 任务面板集成：与 tab.log 联动，展示运行中任务的实时日志与停止按钮。
+
+所属模块：UI 层 (tab)
+依赖文件：
+  - app_cmd.config.BuyConfig        (抢票配置对象)
+  - tab.log                         (任务面板刷新与渲染)
+  - task.buy                        (buy_new_terminal，启动终端抢票子进程)
+  - util                            (ConfigDB / GlobalStatusInstance / LOG_DIR / time_service)
+  - util.Constant                   (BEIJING_TZ / DEFAULT_REQUEST_INTERVAL 等常量)
+
+对外能力：
+  - go_start_tab() → 返回 (task_refresh_token, task_panel, load_go_start_configs, [interval_ui])，
+    供 ticker.py 注册“操作抢票”标签页与初始化回调。
+"""
+
+import datetime
 import html
 import json
 import os
@@ -31,12 +56,39 @@ from util.Constant import (
 
 
 def withTimeString(string):
+    """
+    为字符串添加当前北京时间前缀。
+
+    输入参数：
+      string : str — 原始文本。
+
+    返回值：
+      str — 形如 "2025-08-01 12:00:00: 原始文本" 的字符串。
+
+    调用场景：
+      抢票任务输出日志时常用，便于按北京时间定位事件。
+    """
     return (
         f"{datetime.datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}: {string}"
     )
 
 
 def _build_task_log_path(filename: str) -> str:
+    """
+    为任务生成唯一日志文件路径。
+
+    核心作用：
+      基于文件名和 UUID 短码构建安全的日志文件路径，避免同名冲突。
+
+    输入参数：
+      filename : str — 原始配置文件名。
+
+    返回值：
+      str — LOG_DIR 下的日志文件绝对路径。
+
+    调用场景：
+      launch_task() 中为每个新启动的抢票子进程分配独立日志文件。
+    """
     filename_only = os.path.splitext(os.path.basename(filename))[0]
     safe_name = "".join(
         ch if ch.isalnum() or ch in "-_." else "_" for ch in filename_only
@@ -46,6 +98,22 @@ def _build_task_log_path(filename: str) -> str:
 
 
 def _parse_sale_start(value) -> datetime.datetime | None:
+    """
+    解析 sale_start 字段为北京时间 datetime 对象。
+
+    支持的输入：
+      - int/float 时间戳（秒）
+      - 字符串 "%Y-%m-%d %H:%M:%S" 或 "%Y-%m-%dT%H:%M:%S"
+
+    输入参数：
+      value : int | float | str — 原始 sale_start 值。
+
+    返回值：
+      datetime.datetime | None — 解析成功返回带 BEIJING_TZ 时区的 datetime；否则 None。
+
+    调用场景：
+      auto_fill_time() 中用于统一处理配置文件里的起售时间字段。
+    """
     if isinstance(value, (int, float)):
         return datetime.datetime.fromtimestamp(value, tz=BEIJING_TZ)
     if isinstance(value, str) and value.strip():
@@ -58,6 +126,18 @@ def _parse_sale_start(value) -> datetime.datetime | None:
 
 
 def _preview_value(value) -> str:
+    """
+    将任意值格式化为可展示字符串，空值显示为 "-"。
+
+    输入参数：
+      value : Any — 待展示值。
+
+    返回值：
+      str — 列表会拼接为 "、" 分隔；None/""/[] 返回 "-"。
+
+    调用场景：
+      _render_ticket_preview() 中格式化配置字段显示。
+    """
     if value in (None, "", []):
         return "-"
     if isinstance(value, list):
@@ -66,6 +146,18 @@ def _preview_value(value) -> str:
 
 
 def _format_price_cents(value) -> str:
+    """
+    将分单位价格格式化为人民币字符串。
+
+    输入参数：
+      value : int | float | str — 价格（单位：分）。
+
+    返回值：
+      str — 形如 "¥128.00"；解析失败回退到 _preview_value。
+
+    调用场景：
+      _render_ticket_preview() 中显示票价。
+    """
     try:
         amount = int(value)
     except (TypeError, ValueError):
@@ -74,6 +166,21 @@ def _format_price_cents(value) -> str:
 
 
 def _format_buyer_identity(buyer_info) -> str:
+    """
+    格式化购票人身份信息为可展示文本。
+
+    核心作用：
+      将 buyer_info 列表中的姓名与证件类型映射为 "姓名（证件类型）" 的拼接文本。
+
+    输入参数：
+      buyer_info : list[dict] — 购票人信息列表，每项含 name 与 id_type。
+
+    返回值：
+      str — 多个购票人以 "、" 分隔；无有效数据返回 "-"。
+
+    调用场景：
+      _render_ticket_preview() 中展示实名购票人。
+    """
     if not isinstance(buyer_info, list) or not buyer_info:
         return "-"
 
@@ -95,6 +202,21 @@ def _format_buyer_identity(buyer_info) -> str:
 
 
 def _render_ticket_preview(config: dict) -> str:
+    """
+    渲染单个抢票配置的预览 HTML。
+
+    核心作用：
+      根据配置字典生成包含账号、票数、单价、详细信息和实名购票人的紧凑卡片 HTML。
+
+    输入参数：
+      config : dict — 抢票配置字典。
+
+    返回值：
+      str — HTML 字符串，供 Gradio HTML 组件展示。
+
+    调用场景：
+      upload() / file_select_handler() / _build_session_ticket_preview() 中刷新预览区。
+    """
     items = [
         ("账号", _preview_value(config.get("username"))),
         ("票数", _preview_value(config.get("count"))),
@@ -123,10 +245,31 @@ def _render_ticket_preview(config: dict) -> str:
 
 @runtime_state_reader(GO_UPLOADED_FILES_STATE_KEY, kind="path_list")
 def _get_session_upload_files() -> list[str]:
+    """
+    从运行时状态读取当前会话已上传的文件路径列表。
+
+    返回值：
+      list[str] — 上传文件路径列表；无数据默认返回空列表。
+
+    调用场景：
+      页面初始化与上传事件后恢复文件列表；upload_ui 的 value 与 _build_session_ticket_preview() 使用。
+    """
     return []
 
 
 def _build_session_ticket_preview() -> str:
+    """
+    构建当前会话的票务预览 HTML。
+
+    核心作用：
+      若存在已上传文件，读取第一个 JSON 配置并渲染预览；失败则展示错误信息。
+
+    返回值：
+      str — HTML 预览字符串。
+
+    调用场景：
+      ticket_ui 组件的 value 初始化回调。
+    """
     files = _get_session_upload_files()
     if not files:
         return _render_ticket_preview({})
@@ -141,12 +284,46 @@ def _build_session_ticket_preview() -> str:
 
 
 def go_start_tab():
+    """
+    构建“操作抢票”标签页。
+
+    核心作用：
+      1. 创建 Gradio 组件：文件上传区、配置预览、代理状态表格、抢票时间选择器、
+         抢票间隔输入框、开始抢票按钮、任务管理面板。
+      2. 绑定交互事件：上传/选中文件时预览配置、自动填写起售时间、
+         刷新代理状态、点击开始抢票后启动子进程并刷新任务面板。
+      3. 支持两种代理分配策略：
+         - balanced（默认）：将代理均匀分配给每个任务。
+         - queue：队列模式，每个 worker 对应一个代理槽，顺序消费任务。
+      4. 限制并发数量：运行中任务数 + 新启动任务数不得超过可用代理总数。
+
+    返回值：
+      tuple — (task_refresh_token, task_panel, load_go_start_configs, [interval_ui])，
+              供 ticker.py 注册页面与初始化加载回调使用。
+
+    调用场景：
+      ticker_cmd() 中注册“操作抢票”标签页时调用。
+    """
     auto_fill_time_default = ConfigDB.get("autoFillTime")
     if auto_fill_time_default is None:
         auto_fill_time_default = True
 
     def get_proxy_status():
-        """获取代理状态信息"""
+        """
+        获取代理状态信息并渲染为 HTML 表格。
+
+        核心作用：
+          1. 读取 ConfigDB 中 https_proxy 配置，拆分为代理列表。
+          2. 使用 ProxyTester 逐个测试代理连通性与延时。
+          3. 查询 GlobalStatusInstance 获取代理当前被哪些任务占用。
+          4. 汇总为 HTML 表格展示。
+
+        返回值：
+          str — HTML 表格或提示文本。
+
+        调用场景：
+          proxy_status_ui 初始 value 与 refresh_proxy_btn 点击回调。
+        """
         try:
             from util.proxy.ProxyTester import ProxyTester
             from util import GlobalStatusInstance
@@ -282,6 +459,18 @@ def go_start_tab():
 
     @runtime_state_writer(GO_UPLOADED_FILES_STATE_KEY, kind="path_list")
     def upload(filepath):
+        """
+        文件上传回调：读取 JSON 配置并渲染预览。
+
+        输入参数：
+          filepath : list[str] — 上传文件路径列表。
+
+        返回值：
+          gradio.update — 更新 ticket_ui 的 value 与 visible。
+
+        调用场景：
+          upload_ui.upload 事件触发。
+        """
         try:
             with open(filepath[0], "r", encoding="utf-8") as file:
                 content = json.load(file)
@@ -296,6 +485,19 @@ def go_start_tab():
             )
 
     def file_select_handler(select_data: SelectData, files):
+        """
+        文件列表选中回调：预览当前选中的配置文件。
+
+        输入参数：
+          select_data : SelectData — Gradio 选择事件数据，含 index。
+          files       : list — 当前文件列表。
+
+        返回值：
+          str — HTML 预览字符串。
+
+        调用场景：
+          upload_ui.select 事件触发。
+        """
         file_label = files[select_data.index]
         try:
             with open(file_label, "r", encoding="utf-8") as file:
@@ -307,6 +509,24 @@ def go_start_tab():
             )
 
     def auto_fill_time(files):
+        """
+        自动填写抢票时间：取所有配置中最晚的 sale_start。
+
+        核心作用：
+          1. 遍历上传文件，解析每个配置的 sale_start。
+          2. 若 sale_start 无效，抛出 gr.Error。
+          3. 若已过时，提示无需填写并返回空字符串。
+          4. 若多个配置 sale_start 不一致，取最晚时间并警告用户。
+
+        输入参数：
+          files : list[str] — 上传的配置文件路径列表。
+
+        返回值：
+          str — datetime-local 格式字符串（YYYY-MM-DDTHH:MM:SS），或空字符串。
+
+        调用场景：
+          auto_fill_time_btn 点击与 upload_ui.upload 的 then 链式回调中触发。
+        """
         if not files:
             gr.Warning("请先上传至少一个抢票配置文件。")
             return ""
@@ -345,6 +565,22 @@ def go_start_tab():
         return autofill_value
 
     def split_proxies(https_proxy_list: list[str], task_num: int) -> list[list[str]]:
+        """
+        将代理列表按任务数轮询拆分。
+
+        核心作用：
+          实现均衡分配策略：第 i 个代理分配给第 i % task_num 个任务。
+
+        输入参数：
+          https_proxy_list : list[str] — 可用代理列表（含 "none" 直连）。
+          task_num         : int — 任务数量。
+
+        返回值：
+          list[list[str]] — 每个子列表对应该任务分配到的代理。
+
+        调用场景：
+          start_go() 的 balanced 模式中使用。
+        """
         assigned_proxies: list[list[str]] = [[] for _ in range(task_num)]
         for i, proxy in enumerate(https_proxy_list):
             assigned_proxies[i % task_num].append(proxy)
@@ -355,6 +591,25 @@ def go_start_tab():
         *,
         config: BuyConfig,
     ):
+        """
+        启动单个抢票子进程。
+
+        核心作用：
+          1. 读取配置文件内容。
+          2. 生成唯一日志路径。
+          3. 调用 buy_new_terminal() 启动子进程。
+          4. 在 GlobalStatusInstance 注册任务日志与 PID。
+
+        输入参数：
+          filename : str — 抢票配置文件路径。
+          config   : BuyConfig — 已设置好覆盖项的抢票配置对象。
+
+        返回值：
+          subprocess.Popen — 已启动的子进程对象。
+
+        调用场景：
+          start_go() 的 balanced 与 queue 模式中调用。
+        """
         with open(filename, "r", encoding="utf-8") as file:
             content = file.read()
         filename_only = os.path.basename(filename)
@@ -374,6 +629,29 @@ def go_start_tab():
         return proc
 
     def start_go(files, time_start, interval):
+        """
+        “开始抢票”按钮主回调。
+
+        核心作用：
+          1. 校验文件、解析抢票间隔并持久化到 ConfigDB。
+          2. 读取代理配置，检查并发限制（运行中任务 + 新任务 <= 可用代理数）。
+          3. 若启用 autoCleanupLogs，先清理过期日志与运行目录。
+          4. 根据 proxyAssignmentStrategy 选择启动模式：
+             - queue：启动若干 daemon worker 线程，顺序消费文件列表。
+             - balanced（默认）：将代理均匀拆分后，为每个文件启动独立子进程。
+          5. 刷新任务面板。
+
+        输入参数：
+          files      : list[str] — 上传的配置文件路径列表。
+          time_start : str — 用户设置的抢票开始时间（datetime-local 字符串）。
+          interval   : int | str | None — 抢票间隔毫秒数。
+
+        返回值：
+          gradio.update — 更新任务面板可见性。
+
+        调用场景：
+          go_btn 按钮点击时触发。
+        """
         if not files:
             gr.Warning("未提交抢票配置。")
             return gr.update(visible=False)
@@ -439,6 +717,18 @@ def go_start_tab():
             pending_lock = threading.Lock()
 
             def queue_worker(proxy_slot: str):
+                """
+                队列模式工作线程：按顺序消费待抢票文件。
+
+                输入参数：
+                  proxy_slot : str — 该 worker 固定使用的代理（或 "none"）。
+
+                返回值：
+                  无。
+
+                调用场景：
+                  start_go() 的 queue 模式中由 daemon 线程启动。
+                """
                 while True:
                     with pending_lock:
                         if not pending_files:
@@ -481,6 +771,18 @@ def go_start_tab():
 
     @runtime_state_writer(GO_UPLOADED_FILES_STATE_KEY, kind="path_list")
     def sync_uploaded_files(files):
+        """
+        同步上传文件列表到运行时状态。
+
+        输入参数：
+          files : list[str] — 当前上传文件列表。
+
+        返回值：
+          None（仅触发 runtime_state_writer 副作用）。
+
+        调用场景：
+          upload_ui.change 事件触发。
+        """
         return None
 
     @runtime_state_writer(
@@ -489,12 +791,36 @@ def go_start_tab():
         value_getter=lambda args, kwargs, result: [],
     )
     def clear_uploaded_files(_files):
+        """
+        清空上传文件回调：重置预览为空。
+
+        输入参数：
+          _files : list — 当前文件列表（未使用）。
+
+        返回值：
+          gradio.update — 重置 ticket_ui 为空白预览。
+
+        调用场景：
+          upload_ui.clear 事件触发。
+        """
         return gr.update(value=_render_ticket_preview({}), visible=True)
 
     upload_ui.upload(fn=upload, inputs=upload_ui, outputs=ticket_ui)
     upload_ui.change(fn=sync_uploaded_files, inputs=upload_ui, outputs=None)
 
     def maybe_auto_fill_time(files):
+        """
+        根据 autoFillTime 配置决定是否自动填写抢票时间。
+
+        输入参数：
+          files : list[str] — 上传的配置文件路径列表。
+
+        返回值：
+          str — 自动填写的时间字符串，或空字符串。
+
+        调用场景：
+          upload_ui.upload 的 then 链式回调中触发。
+        """
         if not ConfigDB.get("autoFillTime"):
             return ""
         return auto_fill_time(files)
@@ -572,6 +898,15 @@ def go_start_tab():
     )
 
     def load_go_start_configs():
+        """
+        加载“操作抢票”页初始化配置。
+
+        返回值：
+          gradio.update — 更新抢票间隔输入框为数据库中保存的值。
+
+        调用场景：
+          ticker.py 在页面加载时调用。
+        """
         return gr.update(
             value=ConfigDB.get_as_int("requestInterval", DEFAULT_REQUEST_INTERVAL)
         )
