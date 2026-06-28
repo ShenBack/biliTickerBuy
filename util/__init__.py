@@ -8,7 +8,7 @@
     - util.ErrorCodes
     - util.request.BiliRequest
 对外能力：
-    1. 计算并暴露 EXE_PATH、TEMP_PATH、LOG_DIR、CONFIG_DB_PATH、GLOBAL_COOKIE_PATH 等路径常量；
+    1. 计算并暴露 EXE_PATH、TEMP_PATH、CONFIGS_DIR、LOG_DIR、CONFIG_DB_PATH、GLOBAL_COOKIE_PATH 等路径常量；
     2. 初始化全局日志配置；
     3. 创建全局 ConfigDB、main_request、time_service；
     4. 提供 TaskLogEntry、RuntimeStateStore、GlobalStatus 等运行时状态数据结构；
@@ -92,6 +92,8 @@ def get_application_tmp_path() -> str:
 
 TEMP_PATH: str = get_application_tmp_path()  # 临时目录
 os.environ["GRADIO_TEMP_DIR"] = TEMP_PATH
+CONFIGS_DIR: str = os.path.join(EXE_PATH, "configs")
+os.makedirs(CONFIGS_DIR, exist_ok=True)
 LOG_DIR: str = os.environ.get("BTB_LOG_DIR", os.path.join(EXE_PATH, "btb_logs"))
 os.makedirs(LOG_DIR, exist_ok=True)
 log_file_name = os.environ.get("BTB_APP_LOG_NAME", "app.log")
@@ -100,6 +102,7 @@ loguru_config(LOG_DIR, log_file_name, enable_console=True, file_colorize=False)
 
 __all__ = [
     "TEMP_PATH",
+    "CONFIGS_DIR",
     "EXE_PATH",
     "ERRNO_DICT",
     "ConfigDB",

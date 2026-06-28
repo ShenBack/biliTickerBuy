@@ -1,21 +1,22 @@
-"""
+﻿"""
 tab/go.py — 抢票操作与任务管理页面。
 
 文件整体功能：
   提供 Gradio UI 的“操作抢票”标签页（go_start_tab），包含以下核心能力：
   1. 上传抢票配置文件（JSON），支持多文件同时上传，每个文件对应一个独立抢票任务。
-  2. 配置预览：解析并渲染上传配置中的账号、票数、单价、购票人实名等信息。
-  3. 代理状态监控：展示已配置代理的连通性、延时、使用状态、出口 IP 等。
-  4. 抢票时间选择：通过原生 datetime-local 输入框设置抢票开始时间，支持自动填写。
-  5. 任务启动：根据代理分配策略（均衡/队列）启动子进程执行抢票，自动限制并发数量。
-  6. 任务面板集成：与 tab.log 联动，展示运行中任务的实时日志与停止按钮。
+  2. 已生成配置选择：自动扫描 configs/ 目录，列出“生成配置”页保存的配置，选择后自动填充到上传区。
+  3. 配置预览：解析并渲染上传配置中的账号、票数、单价、购票人实名等信息。
+  4. 代理状态监控：展示已配置代理的连通性、延时、使用状态、出口 IP 等。
+  5. 抢票时间选择：通过原生 datetime-local 输入框设置抢票开始时间，支持自动填写。
+  6. 任务启动：根据代理分配策略（均衡/队列）启动子进程执行抢票，自动限制并发数量。
+  7. 任务面板集成：与 tab.log 联动，展示运行中任务的实时日志与停止按钮。
 
 所属模块：UI 层 (tab)
 依赖文件：
   - app_cmd.config.BuyConfig        (抢票配置对象)
   - tab.log                         (任务面板刷新与渲染)
   - task.buy                        (buy_new_terminal，启动终端抢票子进程)
-  - util                            (ConfigDB / GlobalStatusInstance / LOG_DIR / time_service)
+  - util                            (ConfigDB / CONFIGS_DIR / GlobalStatusInstance / LOG_DIR / time_service)
   - util.Constant                   (BEIJING_TZ / DEFAULT_REQUEST_INTERVAL 等常量)
 
 对外能力：
@@ -40,6 +41,7 @@ from tab.log import refresh_task_panel, render_task_manager_panel, visible_task_
 from task.buy import buy_new_terminal
 from util import (
     ConfigDB,
+    CONFIGS_DIR,
     GlobalStatusInstance,
     LOG_DIR,
     runtime_state_reader,
@@ -283,15 +285,124 @@ def _build_session_ticket_preview() -> str:
         )
 
 
+def list_generated_configs() -> tuple[list[str], list[str]]:
+    """
+    列出 configs/ 目录下已生成的抢票配置文件。
+
+    核心作用：
+      扫描 CONFIGS_DIR 下的 .json 文件，返回用于下拉框展示的 (labels, paths)。
+
+    返回值：
+      tuple[list[str], list[str]]
+        - labels : 下拉框显示文本（文件名）。
+        - paths  : 对应文件的完整路径。
+
+    调用场景：
+      go_start_tab() 中初始化 generated_config_ui；刷新按钮点击回调也调用。
+    """
+    if not os.path.isdir(CONFIGS_DIR):
+        return [], []
+    try:
+        files = [
+            f
+            for f in os.listdir(CONFIGS_DIR)
+            if f.endswith(".json") and os.path.isfile(os.path.join(CONFIGS_DIR, f))
+        ]
+        files.sort(key=lambda name: os.path.getmtime(os.path.join(CONFIGS_DIR, name)), reverse=True)
+        paths = [os.path.join(CONFIGS_DIR, f) for f in files]
+        return files, paths
+    except Exception as exc:
+        logger.warning(f"读取生成配置列表失败: {exc}")
+        return [], []
+
+
+def on_delete_generated_config(selected_labels: list[str] | None) -> tuple[gr.update, gr.update, gr.update]:
+    """
+    删除选中的已生成配置文件。
+
+    输入参数：
+      selected_labels : list[str] | None — 要删除的文件名列表。
+
+    返回值：
+      tuple — (generated_config_ui 的 update, upload_ui 的 update, ticket_ui 的 preview update)。
+    """
+    if not selected_labels:
+        files, _ = list_generated_configs()
+        return (
+            gr.update(choices=files, value=None),
+            gr.update(value=[]),
+            gr.update(value=_render_ticket_preview({})),
+        )
+    if isinstance(selected_labels, str):
+        selected_labels = [selected_labels]
+    files, paths = list_generated_configs()
+    deleted = []
+    for label in selected_labels:
+        if label not in files:
+            continue
+        file_path = paths[files.index(label)]
+        try:
+            os.remove(file_path)
+            deleted.append(label)
+        except Exception as exc:
+            logger.warning(f"删除生成配置失败 {file_path}: {exc}")
+    files, _ = list_generated_configs()
+    return (
+        gr.update(choices=files, value=None),
+        gr.update(value=[]),
+        gr.update(value=_render_ticket_preview({})),
+    )
+
+
+def on_select_generated_config(selected_labels: list[str] | None) -> tuple[gr.update, gr.update]:
+    """
+    选择已生成配置下拉框后的回调（支持多选）。
+
+    核心作用：
+      根据用户选择的多个文件名，找到对应的完整路径并填充到上传组件中，
+      同时合并刷新配置预览。
+
+    输入参数：
+      selected_labels : list[str] | None — 下拉框中选中的文件名列表。
+
+    返回值：
+      tuple — (upload_ui 的 update, ticket_ui 的 preview update)。
+
+    调用场景：
+      generated_config_ui 的 change 事件触发。
+    """
+    if not selected_labels:
+        return gr.update(value=[]), gr.update(value=_render_ticket_preview({}))
+    if isinstance(selected_labels, str):
+        selected_labels = [selected_labels]
+    files, paths = list_generated_configs()
+    selected_paths = []
+    merged_content: dict = {}
+    for label in selected_labels:
+        if label not in files:
+            continue
+        selected_path = paths[files.index(label)]
+        selected_paths.append(selected_path)
+        try:
+            with open(selected_path, "r", encoding="utf-8") as file:
+                content = json.load(file)
+            if not merged_content:
+                merged_content = content
+        except Exception as exc:
+            logger.warning(f"读取生成配置失败 {selected_path}: {exc}")
+    preview = _render_ticket_preview(merged_content)
+    return gr.update(value=selected_paths), gr.update(value=preview)
+
+
 def go_start_tab():
     """
     构建“操作抢票”标签页。
 
     核心作用：
-      1. 创建 Gradio 组件：文件上传区、配置预览、代理状态表格、抢票时间选择器、
-         抢票间隔输入框、开始抢票按钮、任务管理面板。
-      2. 绑定交互事件：上传/选中文件时预览配置、自动填写起售时间、
-         刷新代理状态、点击开始抢票后启动子进程并刷新任务面板。
+      1. 创建 Gradio 组件：文件上传区、配置预览、已生成配置选择器、代理状态表格、
+         抢票时间选择器、抢票间隔输入框、开始抢票按钮、任务管理面板。
+      2. 绑定交互事件：上传/选中文件时预览配置、从下拉框选择已生成配置时自动填充、
+         自动填写起售时间、刷新代理状态、点击开始抢票后启动子进程并刷新任务面板。
       3. 支持两种代理分配策略：
          - balanced（默认）：将代理均匀分配给每个任务。
          - queue：队列模式，每个 worker 对应一个代理槽，顺序消费任务。
@@ -395,6 +506,45 @@ def go_start_tab():
                         value=_build_session_ticket_preview,
                         visible=True,
                     )
+
+            # 已生成配置选择器：读取 configs/ 目录，方便用户在生成配置后直接选用
+            generated_config_files, generated_config_paths = list_generated_configs()
+            with gr.Column(elem_classes="!items-start !gap-3"):
+                generated_config_ui = gr.CheckboxGroup(
+                    label="已生成的配置（从生成配置页自动同步，勾选后自动上传）",
+                    choices=generated_config_files,
+                    value=[],
+                    scale=5,
+                )
+                with gr.Row(elem_classes="!items-end !gap-3"):
+                    refresh_generated_btn = gr.Button(
+                        "刷新列表",
+                        elem_classes="btb-soft-button",
+                        scale=0,
+                        min_width=120,
+                    )
+                    delete_generated_btn = gr.Button(
+                        "删除选中配置",
+                        elem_classes="btb-soft-button",
+                        scale=0,
+                        min_width=160,
+                    )
+
+            refresh_generated_btn.click(
+                fn=lambda: gr.update(choices=list_generated_configs()[0]),
+                inputs=None,
+                outputs=generated_config_ui,
+            )
+            delete_generated_btn.click(
+                fn=on_delete_generated_config,
+                inputs=generated_config_ui,
+                outputs=[generated_config_ui, upload_ui, ticket_ui],
+            )
+            generated_config_ui.change(
+                fn=on_select_generated_config,
+                inputs=generated_config_ui,
+                outputs=[upload_ui, ticket_ui],
+            )
             # 代理状态显示区域
             proxy_status_ui = gr.HTML(
                 value=get_proxy_status,

@@ -19,7 +19,7 @@ tab/settings.py — 账号登录与配置生成页面。
 依赖文件：
   - interface.common           (_format_sale_status)
   - interface.project          (fetch_project_payload)
-  - util                       (ConfigDB / GLOBAL_COOKIE_PATH / TEMP_PATH / EXE_PATH)
+  - util                       (ConfigDB / CONFIGS_DIR / GLOBAL_COOKIE_PATH / TEMP_PATH / EXE_PATH)
   - util.request.BiliRequest   (HTTP 请求封装)
   - util.request.CookieManager (Cookie 与账号池管理)
 
@@ -51,6 +51,7 @@ from loguru import logger
 from interface.common import _format_sale_status
 from interface.project import fetch_project_payload
 from util import ConfigDB
+from util import CONFIGS_DIR
 from util import GLOBAL_COOKIE_PATH
 from util import TEMP_PATH
 from util import set_main_request
@@ -925,7 +926,8 @@ def on_submit_all(
         if "link_id" in ticket_cur["ticket"]:
             config_dir["link_id"] = ticket_cur["ticket"]["link_id"]
 
-        filename = os.path.join(TEMP_PATH, filename_filter(detail) + ".json")
+        os.makedirs(CONFIGS_DIR, exist_ok=True)
+        filename = os.path.join(CONFIGS_DIR, filename_filter(detail) + ".json")
         with open(filename, "w", encoding="utf-8") as handle:
             json.dump(config_dir, handle, ensure_ascii=False, indent=4)
 
